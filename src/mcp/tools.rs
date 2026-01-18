@@ -59,7 +59,9 @@ pub async fn execute_tool(
                 .ok_or_else(|| anyhow::anyhow!("Agent not found: {}", agent_name))?;
 
             let pty_manager = session_manager.pty_manager();
-            let response = session.ask(message.to_string(), timeout, pty_manager).await?;
+            let response = session
+                .ask(message.to_string(), timeout, pty_manager)
+                .await?;
 
             Ok(response)
         }

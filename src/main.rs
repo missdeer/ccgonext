@@ -251,8 +251,9 @@ async fn create_session_manager(config: &Config) -> anyhow::Result<Arc<SessionMa
     for (name, agent_config) in &config.agents {
         let adapter = agent::create_agent(name, agent_config);
 
-        let log_provider: Arc<dyn log_provider::LogProvider> =
-            Arc::from(log_provider::create_log_provider(&agent_config.log_provider, None));
+        let log_provider: Arc<dyn log_provider::LogProvider> = Arc::from(
+            log_provider::create_log_provider(&agent_config.log_provider, None),
+        );
 
         let session = AgentSession::new(
             name.clone(),
@@ -278,14 +279,24 @@ fn show_config(config: &Config) {
     println!();
     println!("Web:");
     println!("  Input enabled: {}", config.web.input_enabled);
-    println!("  Auth token: {}", if config.web.auth_token.is_some() { "set" } else { "none" });
+    println!(
+        "  Auth token: {}",
+        if config.web.auth_token.is_some() {
+            "set"
+        } else {
+            "none"
+        }
+    );
     println!("  Buffer size: {} bytes", config.web.output_buffer_size);
     println!();
     println!("Timeouts:");
     println!("  Default: {}s", config.timeouts.default);
     println!("  Startup: {}s", config.timeouts.startup);
     println!("  Max start retries: {}", config.timeouts.max_start_retries);
-    println!("  Start retry delay: {}ms", config.timeouts.start_retry_delay_ms);
+    println!(
+        "  Start retry delay: {}ms",
+        config.timeouts.start_retry_delay_ms
+    );
     println!();
     println!("Agents:");
     for (name, agent_config) in &config.agents {

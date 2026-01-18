@@ -30,7 +30,10 @@ pub fn validate_origin(headers: &HeaderMap, allowed_port: u16) -> bool {
     let (host, port) = if let Some(colon_pos) = host_part.rfind(':') {
         let host = &host_part[..colon_pos];
         let port_str = &host_part[colon_pos + 1..];
-        let port = port_str.split('/').next().and_then(|p| p.parse::<u16>().ok());
+        let port = port_str
+            .split('/')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok());
         (host, port)
     } else {
         (host_part.split('/').next().unwrap_or(host_part), None)
