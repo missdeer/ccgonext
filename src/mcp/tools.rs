@@ -15,7 +15,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Name of the agent (codex, gemini, opencode)"
+                    "description": "Name of the agent (codex, gemini, opencode, claudecode)"
                 },
                 "message": {
                     "type": "string",

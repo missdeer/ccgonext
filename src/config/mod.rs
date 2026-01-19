@@ -41,6 +41,15 @@ impl Default for Config {
             },
         );
 
+        agents.insert(
+            "claudecode".to_string(),
+            AgentConfig {
+                command: "claude".to_string(),
+                args: vec![],
+                log_provider: "pty".to_string(), // PTY-only, no log file
+            },
+        );
+
         Self {
             server: ServerConfig::default(),
             agents,
@@ -117,5 +126,91 @@ impl Default for WebConfig {
 impl Config {
     pub fn get_agent(&self, name: &str) -> Option<&AgentConfig> {
         self.agents.get(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+
+        // Test agents
+        assert!(config.agents.contains_key("codex"));
+        assert!(config.agents.contains_key("gemini"));
+        assert!(config.agents.contains_key("opencode"));
+        assert!(config.agents.contains_key("claudecode"));
+
+        // Test server config
+        assert_eq!(config.server.port, 8765);
+        assert_eq!(config.server.host, "127.0.0.1");
+
+        // Test timeouts
+        assert_eq!(config.timeouts.default, 600);
+        assert_eq!(config.timeouts.startup, 30);
+
+        // Test web config
+        assert!(config.web.auth_token.is_none());
+        assert!(!config.web.input_enabled);
+    }
+
+    #[test]
+    fn test_config_get_agent() {
+        let config = Config::default();
+
+        let codex = config.get_agent("codex");
+        assert!(codex.is_some());
+        assert_eq!(codex.unwrap().command, "codex");
+
+        let nonexistent = config.get_agent("nonexistent");
+        assert!(nonexistent.is_none());
+    }
+
+    #[test]
+    fn test_agent_config_claudecode() {
+        let config = Config::default();
+        let claudecode = config.get_agent("claudecode").unwrap();
+
+        assert_eq!(claudecode.command, "claude");
+        assert_eq!(claudecode.log_provider, "pty");
+        assert!(claudecode.args.is_empty());
+    }
+
+    #[test]
+    fn test_server_config_default() {
+        let server = ServerConfig::default();
+        assert_eq!(server.port, 8765);
+        assert_eq!(server.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_timeout_config_default() {
+        let timeouts = TimeoutConfig::default();
+        assert_eq!(timeouts.default, 600);
+        assert_eq!(timeouts.startup, 30);
+        assert_eq!(timeouts.ready_check, 30);
+        assert_eq!(timeouts.queue_wait, 60);
+        assert_eq!(timeouts.max_stuck_duration, 300);
+        assert_eq!(timeouts.max_start_retries, 3);
+        assert_eq!(timeouts.start_retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn test_web_config_default() {
+        let web = WebConfig::default();
+        assert!(web.auth_token.is_none());
+        assert!(!web.input_enabled);
+        assert_eq!(web.output_buffer_size, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config1 = Config::default();
+        let config2 = config1.clone();
+
+        assert_eq!(config1.server.port, config2.server.port);
+        assert_eq!(config1.agents.len(), config2.agents.len());
     }
 }

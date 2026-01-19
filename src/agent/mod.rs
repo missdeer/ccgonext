@@ -3,10 +3,12 @@
 use async_trait::async_trait;
 use std::path::Path;
 
+mod claudecode;
 mod codex;
 mod gemini;
 mod opencode;
 
+pub use claudecode::ClaudeCodeAgent;
 pub use codex::CodexAgent;
 pub use gemini::GeminiAgent;
 pub use opencode::OpenCodeAgent;
@@ -98,6 +100,7 @@ pub fn create_agent(name: &str, config: &crate::config::AgentConfig) -> Box<dyn 
         "codex" => Box::new(CodexAgent::new()),
         "gemini" => Box::new(GeminiAgent::new()),
         "opencode" => Box::new(OpenCodeAgent::new()),
+        "claudecode" => Box::new(ClaudeCodeAgent::new()),
         _ => Box::new(GenericAgent::new(
             name.to_string(),
             config.command.clone(),
