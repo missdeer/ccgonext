@@ -45,25 +45,16 @@ pub struct GenericAgent {
 }
 
 impl GenericAgent {
-    pub fn new(
-        name: String,
-        command: String,
-        args: Vec<String>,
-        ready_pattern: String,
-        error_patterns: Vec<String>,
-        supports_cwd: bool,
-        sentinel_template: String,
-        sentinel_regex: String,
-    ) -> Self {
+    pub fn new(name: String, config: &crate::config::AgentConfig) -> Self {
         Self {
             name,
-            ready_pattern,
-            error_patterns,
-            command,
-            args,
-            supports_cwd,
-            sentinel_template,
-            sentinel_regex,
+            ready_pattern: config.ready_pattern.clone(),
+            error_patterns: config.error_patterns.clone(),
+            command: config.command.clone(),
+            args: config.args.clone(),
+            supports_cwd: config.supports_cwd,
+            sentinel_template: config.sentinel_template.clone(),
+            sentinel_regex: config.sentinel_regex.clone(),
         }
     }
 }
@@ -118,14 +109,5 @@ pub fn create_agent(name: &str, config: &crate::config::AgentConfig) -> Box<dyn 
     }
 
     // All other agents use GenericAgent with configuration
-    Box::new(GenericAgent::new(
-        name.to_string(),
-        config.command.clone(),
-        config.args.clone(),
-        config.ready_pattern.clone(),
-        config.error_patterns.clone(),
-        config.supports_cwd,
-        config.sentinel_template.clone(),
-        config.sentinel_regex.clone(),
-    ))
+    Box::new(GenericAgent::new(name.to_string(), config))
 }

@@ -4,8 +4,8 @@
 //! ClaudeCode PTY-based reply detection.
 
 use async_trait::async_trait;
-use ccgo::agent::ClaudeCodeAgent;
-use ccgo::config::TimeoutConfig;
+use ccgo::agent::{ClaudeCodeAgent, GenericAgent};
+use ccgo::config::{AgentConfig, TimeoutConfig};
 use ccgo::log_provider::{HistoryEntry, LogEntry, LogProvider};
 use ccgo::pty::PtyManager;
 use ccgo::session::AgentSession;
@@ -102,7 +102,19 @@ async fn test_claudecode_pty_reply_detection() {
 async fn test_claudecode_type_detection() {
     // Create agents
     let claudecode = Arc::new(ClaudeCodeAgent::new());
-    let codex = Arc::new(ccgo::agent::CodexAgent::new());
+
+    // Create a test AgentConfig for codex
+    let codex_config = AgentConfig {
+        command: "codex".to_string(),
+        args: vec![],
+        log_provider: "codex".to_string(),
+        ready_pattern: r"^(>|codex>)".to_string(),
+        error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
+        supports_cwd: true,
+        sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
+        sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
+    };
+    let codex = Arc::new(GenericAgent::new("codex".to_string(), &codex_config));
 
     // Create mock log provider
     let log_provider = Arc::new(MockLogProvider);
