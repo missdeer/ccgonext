@@ -1,6 +1,7 @@
 //! Agent adapter trait and implementations
 
 use async_trait::async_trait;
+use std::any::Any;
 use std::path::Path;
 
 mod claudecode;
@@ -34,6 +35,8 @@ pub trait Agent: Send + Sync {
     }
 
     fn extract_sentinel_id(&self, output: &str) -> Option<String>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub struct GenericAgent {
@@ -92,6 +95,10 @@ impl Agent for GenericAgent {
     fn extract_sentinel_id(&self, output: &str) -> Option<String> {
         let pattern = regex::Regex::new(r"<<MSG_ID:([a-f0-9-]+)>>").ok()?;
         pattern.captures(output).map(|c| c[1].to_string())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

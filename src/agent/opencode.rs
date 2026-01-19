@@ -56,4 +56,8 @@ impl Agent for OpenCodeAgent {
         let pattern = regex::Regex::new(r"\[\[MSG:([a-f0-9-]+)\]\]").ok()?;
         pattern.captures(output).map(|c| c[1].to_string())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

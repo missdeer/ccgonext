@@ -1,6 +1,6 @@
 //! Session management layer
 
-use crate::agent::Agent;
+use crate::agent::{Agent, ClaudeCodeAgent};
 use crate::config::TimeoutConfig;
 use crate::log_provider::LogProvider;
 use crate::pty::PtyHandle;
@@ -81,6 +81,7 @@ struct PreparedRequest {
     message_with_sentinel: String,
     baseline_offset: u64,
     request_timeout: Duration,
+    pty_start_offset: u64, // For ClaudeCode PTY parsing
 }
 
 impl AgentSession {
@@ -534,6 +535,16 @@ impl AgentSession {
         // Get baseline offset for log detection
         let baseline_offset = self.log_provider.get_current_offset().await;
 
+        // Get PTY offset for ClaudeCode parsing (before writing)
+        let pty_start_offset = {
+            let pty_guard = self.pty.read().await;
+            if let Some(pty) = pty_guard.as_ref() {
+                pty.get_current_offset().await
+            } else {
+                0
+            }
+        };
+
         // Store current request
         *self.current_request.lock().await = Some(request);
 
@@ -542,6 +553,7 @@ impl AgentSession {
             message_with_sentinel,
             baseline_offset,
             request_timeout,
+            pty_start_offset,
         })
     }
 
@@ -590,13 +602,26 @@ impl AgentSession {
         }
         drop(pty_guard);
 
-        // Start reply detection with per-request timeout
-        Self::spawn_reply_detection(
-            Arc::clone(self),
-            prepared.message_id,
-            prepared.baseline_offset,
-            prepared.request_timeout,
-        );
+        // Check if this is ClaudeCode agent (PTY-only parsing)
+        let is_claudecode = self.adapter.as_any().is::<ClaudeCodeAgent>();
+
+        if is_claudecode {
+            // ClaudeCode: Use PTY parsing instead of LogProvider
+            Self::spawn_claudecode_reply_detection(
+                Arc::clone(self),
+                prepared.message_id,
+                prepared.pty_start_offset,
+                prepared.request_timeout,
+            );
+        } else {
+            // Other agents: Use LogProvider
+            Self::spawn_reply_detection(
+                Arc::clone(self),
+                prepared.message_id,
+                prepared.baseline_offset,
+                prepared.request_timeout,
+            );
+        }
 
         (Ok(()), false)
     }
@@ -721,6 +746,73 @@ impl AgentSession {
         });
     }
 
+    /// ClaudeCode-specific reply detection using PTY parsing
+    fn spawn_claudecode_reply_detection(
+        session: Arc<Self>,
+        message_id: String,
+        pty_start_offset: u64,
+        timeout: Duration,
+    ) {
+        let name = session.name.clone();
+
+        tokio::spawn(async move {
+            // Get PTY handle
+            let pty = {
+                let pty_guard = session.pty.read().await;
+                match pty_guard.as_ref() {
+                    Some(p) => Arc::clone(p),
+                    None => {
+                        tracing::error!("No PTY available for ClaudeCode parsing");
+                        Self::handle_reply_timeout(&session, &name).await;
+                        return;
+                    }
+                }
+            };
+
+            // Downcast adapter to ClaudeCodeAgent
+            let claudecode = match session.adapter.as_any().downcast_ref::<ClaudeCodeAgent>() {
+                Some(cc) => cc,
+                None => {
+                    tracing::error!("Failed to downcast to ClaudeCodeAgent");
+                    Self::handle_reply_timeout(&session, &name).await;
+                    return;
+                }
+            };
+
+            // Call parse_pty_response with per-request timeout
+            match tokio::time::timeout(
+                timeout,
+                claudecode.parse_pty_response(&pty, pty_start_offset, &message_id),
+            )
+            .await
+            {
+                Ok(Ok(response)) => {
+                    tracing::debug!("ClaudeCode reply detected for {}: {}", name, response);
+                    // Create a LogEntry for compatibility with deliver_reply
+                    let entry = crate::log_provider::LogEntry {
+                        offset: pty_start_offset,
+                        content: response,
+                        timestamp: chrono::Utc::now(),
+                        inode: None,
+                    };
+                    Self::deliver_reply(&session, entry).await;
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("ClaudeCode PTY parsing failed for {}: {}", name, e);
+                    Self::deliver_reply_error(
+                        &session,
+                        SessionError::PtyError(e.to_string()),
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    tracing::warn!("ClaudeCode reply detection timed out for {}", name);
+                    Self::handle_reply_timeout(&session, &name).await;
+                }
+            }
+        });
+    }
+
     async fn deliver_reply(session: &Arc<Self>, entry: crate::log_provider::LogEntry) {
         // Deliver result to waiting request
         {
@@ -739,6 +831,24 @@ impl AgentSession {
         }
 
         // Process next request in queue
+        let _ = session.process_next_request().await;
+    }
+
+    async fn deliver_reply_error(session: &Arc<Self>, error: SessionError) {
+        {
+            let mut current_req = session.current_request.lock().await;
+            if let Some(req) = current_req.take() {
+                let _ = req.response_tx.send(Err(error));
+            }
+        }
+
+        if let Err(e) = session
+            .apply_transition(StateTransition::ReplyReceived)
+            .await
+        {
+            tracing::warn!("Failed to apply ReplyReceived: {}", e);
+        }
+
         let _ = session.process_next_request().await;
     }
 
@@ -817,5 +927,184 @@ impl SessionManager {
         self.pty_manager.shutdown_all().await;
 
         tracing::info!("All sessions shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ClaudeCodeAgent;
+    use crate::config::TimeoutConfig;
+    use crate::log_provider::{HistoryEntry, LogEntry, LogProvider};
+    use crate::pty::PtyManager;
+    use async_trait::async_trait;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // Mock LogProvider for testing
+    struct MockLogProvider;
+
+    #[async_trait]
+    impl LogProvider for MockLogProvider {
+        async fn get_latest_reply(&self, _since_offset: u64) -> Option<LogEntry> {
+            None
+        }
+
+        async fn get_history(
+            &self,
+            _session_id: Option<&str>,
+            _count: usize,
+        ) -> Vec<HistoryEntry> {
+            vec![]
+        }
+
+        async fn get_current_offset(&self) -> u64 {
+            0
+        }
+
+        fn get_inode(&self) -> Option<u64> {
+            None
+        }
+
+        fn get_watch_path(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires actual claude binary installed
+    async fn test_claudecode_pty_reply_detection() {
+        // Create PTY manager
+        let pty_manager = Arc::new(PtyManager::new(100 * 1024 * 1024));
+
+        // Create ClaudeCodeAgent
+        let agent = Arc::new(ClaudeCodeAgent::new());
+
+        // Create mock log provider
+        let log_provider = Arc::new(MockLogProvider);
+
+        // Create session
+        let session = AgentSession::new(
+            "test-claudecode".to_string(),
+            agent.clone(),
+            log_provider,
+            PathBuf::from("/tmp"),
+            TimeoutConfig::default(),
+        );
+
+        let session_arc = Arc::new(session);
+
+        // Start agent (this will create PTY)
+        let start_result = session_arc.start(pty_manager.as_ref()).await;
+        assert!(start_result.is_ok(), "Failed to start session: {:?}", start_result);
+
+        // Wait longer for agent to be ready (claude might take time to start)
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Verify state transitions from Starting to Idle (or remains Starting if claude not found)
+        let state = session_arc.get_state().await;
+        if matches!(state, AgentState::Idle) {
+            // Send a request
+            let request_future = session_arc.ask(
+                "test message".to_string(),
+                Some(Duration::from_secs(10)),
+                pty_manager.as_ref(),
+            );
+
+            // Wait for response with timeout
+            let response = timeout(Duration::from_secs(15), request_future).await;
+
+            // Verify response doesn't timeout (indicating PTY detection works)
+            assert!(
+                response.is_ok(),
+                "Request timed out - ClaudeCode PTY detection may not be working"
+            );
+        }
+
+        // Cleanup
+        let _ = session_arc.stop(true, Some(pty_manager.as_ref())).await;
+    }
+
+    #[tokio::test]
+    async fn test_claudecode_type_detection() {
+        // Create agents
+        let claudecode = Arc::new(ClaudeCodeAgent::new());
+        let codex = Arc::new(crate::agent::CodexAgent::new());
+
+        // Create mock log provider
+        let log_provider = Arc::new(MockLogProvider);
+
+        // Create sessions
+        let cc_session = AgentSession::new(
+            "test-cc".to_string(),
+            claudecode,
+            log_provider.clone(),
+            PathBuf::from("/tmp"),
+            TimeoutConfig::default(),
+        );
+
+        let codex_session = AgentSession::new(
+            "test-codex".to_string(),
+            codex,
+            log_provider,
+            PathBuf::from("/tmp"),
+            TimeoutConfig::default(),
+        );
+
+        // Verify type detection
+        assert!(
+            cc_session.adapter.as_any().is::<ClaudeCodeAgent>(),
+            "ClaudeCodeAgent type detection failed"
+        );
+
+        assert!(
+            !codex_session.adapter.as_any().is::<ClaudeCodeAgent>(),
+            "Codex should not be detected as ClaudeCodeAgent"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires actual claude binary installed
+    async fn test_claudecode_pty_offset_tracking() {
+        // Create PTY manager
+        let pty_manager = Arc::new(PtyManager::new(100 * 1024 * 1024));
+
+        // Create ClaudeCodeAgent
+        let agent = Arc::new(ClaudeCodeAgent::new());
+
+        // Create mock log provider
+        let log_provider = Arc::new(MockLogProvider);
+
+        // Create session
+        let session = AgentSession::new(
+            "test-offset".to_string(),
+            agent.clone(),
+            log_provider,
+            PathBuf::from("/tmp"),
+            TimeoutConfig::default(),
+        );
+
+        let session_arc = Arc::new(session);
+
+        // Start agent
+        let start_result = session_arc.start(pty_manager.as_ref()).await;
+        assert!(start_result.is_ok());
+
+        // Wait for ready
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Get PTY handle and verify offset is valid
+        let pty_guard = session_arc.pty.read().await;
+        if let Some(pty) = pty_guard.as_ref() {
+            let _offset = pty.get_current_offset().await;
+            // Offset is u64, always non-negative, just verify we can get it
+        } else {
+            panic!("PTY should be available after start");
+        }
+
+        drop(pty_guard);
+
+        // Cleanup
+        let _ = session_arc.stop(true, Some(pty_manager.as_ref())).await;
     }
 }

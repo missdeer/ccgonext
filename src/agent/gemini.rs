@@ -56,4 +56,8 @@ impl Agent for GeminiAgent {
         let pattern = regex::Regex::new(r"\u{200B}MSG_ID:([a-f0-9-]+)\u{200B}").ok()?;
         pattern.captures(output).map(|c| c[1].to_string())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
