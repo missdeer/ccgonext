@@ -106,15 +106,13 @@ CCGO 提供一个 MCP 工具：
 | `/codex` | Codex 全屏终端 |
 | `/gemini` | Gemini 全屏终端 |
 | `/opencode` | OpenCode 全屏终端 |
+| `/claudecode` | ClaudeCode 全屏终端 |
 
 ### Web API
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/status` | GET | 获取所有 Agent 状态 |
-| `/api/agents/:name/start` | POST | 启动 Agent |
-| `/api/agents/:name/stop` | POST | 停止 Agent |
-| `/api/agents/:name/interrupt` | POST | 向 Agent 发送 Ctrl+C |
 | `/ws/:agent` | WebSocket | 实时终端 I/O |
 
 ## 环境变量

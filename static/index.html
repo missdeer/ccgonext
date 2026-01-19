@@ -12,25 +12,28 @@
             padding: 0;
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            color: #eee;
+            font-family: 'Courier New', Courier, monospace;
+            background: #ffffff;
+            color: #000000;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
         }
         .header {
-            background: #16213e;
+            background: #ffffff;
             padding: 0.75rem 1.5rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid #0f3460;
+            border-bottom: 1px solid #000000;
             flex-shrink: 0;
         }
         .header h1 {
+            font-family: 'Courier New', Courier, monospace;
             font-size: 1.25rem;
-            color: #e94560;
+            color: #000000;
+            font-weight: 700;
+            letter-spacing: 0.05em;
         }
         .header-right {
             display: flex;
@@ -42,26 +45,31 @@
             gap: 0.5rem;
         }
         .nav-link {
-            color: #aaa;
+            font-family: 'Courier New', Courier, monospace;
+            color: #000000;
             text-decoration: none;
             padding: 0.4rem 0.8rem;
-            border-radius: 4px;
+            border: 1px solid transparent;
             font-size: 0.85rem;
             transition: all 0.2s;
+            letter-spacing: 0.03em;
         }
         .nav-link:hover {
-            background: #0f3460;
-            color: #fff;
+            border-bottom: 1px solid #000000;
         }
         .nav-link.active {
-            background: #e94560;
-            color: #fff;
+            border-bottom: 2px solid #000000;
+            font-weight: 500;
         }
         .status-badge {
-            background: #0f3460;
+            font-family: 'Courier New', Courier, monospace;
+            background: #ffffff;
+            border: 1px solid #000000;
             padding: 0.4rem 0.8rem;
-            border-radius: 20px;
+            border-radius: 0;
             font-size: 0.85rem;
+            color: #000000;
+            letter-spacing: 0.03em;
         }
 
         /* Grid mode (overview) */
@@ -76,69 +84,57 @@
             width: 100%;
         }
         .agent-panel {
-            background: #16213e;
-            border-radius: 8px;
+            background: #ffffff;
+            border-radius: 0;
             overflow: hidden;
-            border: 1px solid #0f3460;
+            border: 1px solid #000000;
             display: flex;
             flex-direction: column;
         }
         .agent-header {
             padding: 0.5rem 1rem;
-            background: #0f3460;
+            background: #ffffff;
+            border-bottom: 1px solid #000000;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-shrink: 0;
         }
         .agent-name {
+            font-family: 'Courier New', Courier, monospace;
             display: flex;
             align-items: center;
             gap: 0.5rem;
             font-weight: 600;
+            letter-spacing: 0.03em;
         }
         .agent-icon {
             font-size: 1.1rem;
         }
         .agent-status {
+            font-family: 'Courier New', Courier, monospace;
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            font-size: 0.8rem;
+            letter-spacing: 0.03em;
         }
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: #666;
+            background: #cccccc;
         }
-        .status-dot.running { background: #4ade80; }
-        .status-dot.stopped { background: #666; }
-        .status-dot.busy { background: #fbbf24; }
-        .status-dot.error { background: #f87171; }
+        .status-dot.running { background: #22c55e; }
+        .status-dot.stopped { background: #cccccc; }
+        .status-dot.busy { background: #eab308; }
+        .status-dot.error { background: #ef4444; }
         .terminal-container {
             flex: 1;
             min-height: 250px;
             padding: 0.25rem;
-        }
-        .agent-controls {
-            padding: 0.5rem;
             background: #1a1a2e;
-            display: flex;
-            gap: 0.5rem;
-            flex-shrink: 0;
         }
-        .btn {
-            padding: 0.35rem 0.7rem;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.8rem;
-            transition: opacity 0.2s;
-        }
-        .btn:hover { opacity: 0.8; }
-        .btn-start { background: #4ade80; color: #000; }
-        .btn-stop { background: #f87171; color: #000; }
-        .btn-interrupt { background: #fbbf24; color: #000; }
 
         /* Fullscreen mode (single agent) */
         .container-full {
@@ -172,9 +168,7 @@
         <div class="header-right">
             <nav class="nav-links">
                 <a href="/" class="nav-link" data-nav="overview">Overview</a>
-                <a href="/codex" class="nav-link" data-nav="codex">Codex</a>
-                <a href="/gemini" class="nav-link" data-nav="gemini">Gemini</a>
-                <a href="/opencode" class="nav-link" data-nav="opencode">OpenCode</a>
+                <!-- Agent links will be dynamically generated -->
             </nav>
             <div class="status-badge" id="global-status">Connecting...</div>
         </div>
@@ -182,62 +176,7 @@
 
     <!-- Overview mode: 2x2 grid -->
     <div class="container-grid" id="overview-container">
-        <div class="agent-panel" data-agent="codex">
-            <div class="agent-header">
-                <div class="agent-name">
-                    <span class="agent-icon">🤖</span>
-                    <span>Codex</span>
-                </div>
-                <div class="agent-status">
-                    <span class="status-dot" id="codex-status-dot"></span>
-                    <span id="codex-status-text">STOPPED</span>
-                </div>
-            </div>
-            <div class="terminal-container" id="codex-terminal"></div>
-            <div class="agent-controls">
-                <button class="btn btn-start" onclick="startAgent('codex')">Start</button>
-                <button class="btn btn-stop" onclick="stopAgent('codex')">Stop</button>
-                <button class="btn btn-interrupt" onclick="interruptAgent('codex')">Interrupt</button>
-            </div>
-        </div>
-
-        <div class="agent-panel" data-agent="gemini">
-            <div class="agent-header">
-                <div class="agent-name">
-                    <span class="agent-icon">💎</span>
-                    <span>Gemini</span>
-                </div>
-                <div class="agent-status">
-                    <span class="status-dot" id="gemini-status-dot"></span>
-                    <span id="gemini-status-text">STOPPED</span>
-                </div>
-            </div>
-            <div class="terminal-container" id="gemini-terminal"></div>
-            <div class="agent-controls">
-                <button class="btn btn-start" onclick="startAgent('gemini')">Start</button>
-                <button class="btn btn-stop" onclick="stopAgent('gemini')">Stop</button>
-                <button class="btn btn-interrupt" onclick="interruptAgent('gemini')">Interrupt</button>
-            </div>
-        </div>
-
-        <div class="agent-panel" data-agent="opencode">
-            <div class="agent-header">
-                <div class="agent-name">
-                    <span class="agent-icon">🔷</span>
-                    <span>OpenCode</span>
-                </div>
-                <div class="agent-status">
-                    <span class="status-dot" id="opencode-status-dot"></span>
-                    <span id="opencode-status-text">STOPPED</span>
-                </div>
-            </div>
-            <div class="terminal-container" id="opencode-terminal"></div>
-            <div class="agent-controls">
-                <button class="btn btn-start" onclick="startAgent('opencode')">Start</button>
-                <button class="btn btn-stop" onclick="stopAgent('opencode')">Stop</button>
-                <button class="btn btn-interrupt" onclick="interruptAgent('opencode')">Interrupt</button>
-            </div>
-        </div>
+        <!-- Agent panels will be dynamically generated -->
     </div>
 
     <!-- Fullscreen mode: single agent -->
@@ -246,10 +185,20 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script>
+        // Centralized agent configuration - single source of truth
+        const AGENTS = [
+            { id: 'codex',      label: 'Codex',      icon: '🤖' },
+            { id: 'gemini',     label: 'Gemini',     icon: '💎' },
+            { id: 'opencode',   label: 'OpenCode',   icon: '🔷' },
+            { id: 'claudecode', label: 'ClaudeCode', icon: '🎯' }
+        ];
+
+        // Create a lookup map for efficient access
+        const agentById = Object.fromEntries(AGENTS.map(a => [a.id, a]));
+        const allAgents = AGENTS.map(a => a.id);
+
         const terminals = {};
         const websockets = {};
-        const allAgents = ['codex', 'gemini', 'opencode'];
-        const agentIcons = { codex: '🤖', gemini: '💎', opencode: '🔷' };
 
         // Determine current mode from URL
         const path = window.location.pathname.replace(/^\//, '').toLowerCase();
@@ -367,31 +316,27 @@
             }
         }
 
-        async function startAgent(agent) {
-            try {
-                await fetch(`/api/agents/${agent}/start`, { method: 'POST' });
-                fetchStatus();
-            } catch (err) {
-                console.error(`Failed to start ${agent}:`, err);
-            }
-        }
+        function createAgentPanel(agent) {
+            const agentData = agentById[agent];
+            if (!agentData) return null;
 
-        async function stopAgent(agent) {
-            try {
-                await fetch(`/api/agents/${agent}/stop`, { method: 'POST' });
-                fetchStatus();
-            } catch (err) {
-                console.error(`Failed to stop ${agent}:`, err);
-            }
-        }
-
-        async function interruptAgent(agent) {
-            try {
-                await fetch(`/api/agents/${agent}/interrupt`, { method: 'POST' });
-                fetchStatus();
-            } catch (err) {
-                console.error(`Failed to interrupt ${agent}:`, err);
-            }
+            const panel = document.createElement('div');
+            panel.className = 'agent-panel';
+            panel.dataset.agent = agent;
+            panel.innerHTML = `
+                <div class="agent-header">
+                    <div class="agent-name">
+                        <span class="agent-icon" aria-hidden="true">${agentData.icon}</span>
+                        <span>${agentData.label}</span>
+                    </div>
+                    <div class="agent-status">
+                        <span class="status-dot" id="${agent}-status-dot"></span>
+                        <span id="${agent}-status-text">STOPPED</span>
+                    </div>
+                </div>
+                <div class="terminal-container" id="${agent}-terminal"></div>
+            `;
+            return panel;
         }
 
         function setupFullscreenMode(agent) {
@@ -399,30 +344,15 @@
             const fullContainer = document.getElementById('fullscreen-container');
             fullContainer.classList.remove('hidden');
 
-            // Create fullscreen panel
-            fullContainer.innerHTML = `
-                <div class="agent-panel" data-agent="${agent}">
-                    <div class="agent-header">
-                        <div class="agent-name">
-                            <span class="agent-icon">${agentIcons[agent]}</span>
-                            <span>${agent.charAt(0).toUpperCase() + agent.slice(1)}</span>
-                        </div>
-                        <div class="agent-status">
-                            <span class="status-dot" id="${agent}-status-dot"></span>
-                            <span id="${agent}-status-text">STOPPED</span>
-                        </div>
-                    </div>
-                    <div class="terminal-container" id="${agent}-terminal"></div>
-                    <div class="agent-controls">
-                        <button class="btn btn-start" onclick="startAgent('${agent}')">Start</button>
-                        <button class="btn btn-stop" onclick="stopAgent('${agent}')">Stop</button>
-                        <button class="btn btn-interrupt" onclick="interruptAgent('${agent}')">Interrupt</button>
-                    </div>
-                </div>
-            `;
+            // Reuse the panel creator
+            const panel = createAgentPanel(agent);
+            if (panel) {
+                fullContainer.innerHTML = '';
+                fullContainer.appendChild(panel);
+            }
 
-            // Update title
-            document.title = `CCGO - ${agent.charAt(0).toUpperCase() + agent.slice(1)}`;
+            const agentData = agentById[agent];
+            document.title = `CCGO - ${agentData ? agentData.label : 'Agent'}`;
         }
 
         function updateNavLinks() {
@@ -436,6 +366,30 @@
 
         // Initialize
         function init() {
+            // Dynamically generate navigation links
+            const navContainer = document.querySelector('.nav-links');
+            if (navContainer) {
+                AGENTS.forEach(agentData => {
+                    const navLink = document.createElement('a');
+                    navLink.href = `/${agentData.id}`;
+                    navLink.className = 'nav-link';
+                    navLink.dataset.nav = agentData.id;
+                    navLink.textContent = agentData.label;
+                    navContainer.appendChild(navLink);
+                });
+            }
+
+            // Dynamically generate agent panels for overview mode
+            const overviewContainer = document.getElementById('overview-container');
+            if (overviewContainer && !singleAgent) {
+                AGENTS.forEach(agentData => {
+                    const panel = createAgentPanel(agentData.id);
+                    if (panel) {
+                        overviewContainer.appendChild(panel);
+                    }
+                });
+            }
+
             updateNavLinks();
 
             if (singleAgent) {

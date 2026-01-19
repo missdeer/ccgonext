@@ -106,15 +106,13 @@ Access the web interface at `http://localhost:8765`:
 | `/codex` | Full-screen Codex terminal |
 | `/gemini` | Full-screen Gemini terminal |
 | `/opencode` | Full-screen OpenCode terminal |
+| `/claudecode` | Full-screen ClaudeCode terminal |
 
 ### Web API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Get status of all agents |
-| `/api/agents/:name/start` | POST | Start an agent |
-| `/api/agents/:name/stop` | POST | Stop an agent |
-| `/api/agents/:name/interrupt` | POST | Send Ctrl+C to agent |
 | `/ws/:agent` | WebSocket | Real-time terminal I/O |
 
 ## Environment Variables

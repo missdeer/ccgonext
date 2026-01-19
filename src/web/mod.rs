@@ -12,11 +12,7 @@ pub use websocket::*;
 
 use crate::config::Config;
 use crate::session::SessionManager;
-use axum::{
-    middleware,
-    routing::{get, post},
-    Router,
-};
+use axum::{middleware, routing::get, Router};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -55,9 +51,6 @@ impl WebServer {
         // Build router with auth middleware
         let app = Router::new()
             .route("/api/status", get(api_get_status))
-            .route("/api/agents/:name/start", post(api_start_agent))
-            .route("/api/agents/:name/stop", post(api_stop_agent))
-            .route("/api/agents/:name/interrupt", post(api_interrupt_agent))
             .route("/ws/:agent", get(ws_handler))
             .fallback(static_handler)
             .layer(middleware::from_fn_with_state(
