@@ -75,7 +75,8 @@ ccgo [选项] [命令]
       --codex-cmd <命令>      Codex 启动命令 [环境变量: CCGO_CODEX_CMD] [默认: codex]
       --gemini-cmd <命令>     Gemini 启动命令 [环境变量: CCGO_GEMINI_CMD] [默认: gemini]
       --opencode-cmd <命令>   OpenCode 启动命令 [环境变量: CCGO_OPENCODE_CMD] [默认: opencode]
-      --agents <列表>         启用的 Agent（逗号分隔）[环境变量: CCGO_AGENTS] [默认: codex,gemini,opencode]
+      --claudecode-cmd <命令> ClaudeCode 启动命令 [环境变量: CCGO_CLAUDECODE_CMD] [默认: claude]
+      --agents <列表>         启用的 Agent（逗号分隔: codex,gemini,opencode,claudecode）[环境变量: CCGO_AGENTS] [默认: codex,gemini,opencode]
   -h, --help                  显示帮助
   -V, --version               显示版本
 ```

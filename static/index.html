@@ -76,12 +76,32 @@
         .container-grid {
             padding: 1rem;
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
             gap: 1rem;
             flex: 1;
             max-width: 1600px;
             margin: 0 auto;
             width: 100%;
+        }
+        /* Dynamic grid layout based on agent count */
+        .container-grid[data-agent-count="1"] {
+            grid-template-columns: 1fr;
+        }
+        .container-grid[data-agent-count="2"] {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .container-grid[data-agent-count="3"] {
+            grid-template-columns: repeat(3, 1fr);
+        }
+        .container-grid[data-agent-count="4"] {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .container-grid[data-agent-count="5"],
+        .container-grid[data-agent-count="6"] {
+            grid-template-columns: repeat(3, 1fr);
+        }
+        /* 7+ agents: use auto-fit for flexibility */
+        .container-grid:not([data-agent-count="1"]):not([data-agent-count="2"]):not([data-agent-count="3"]):not([data-agent-count="4"]):not([data-agent-count="5"]):not([data-agent-count="6"]) {
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
         }
         .agent-panel {
             background: #ffffff;
@@ -195,15 +215,16 @@
 
         // Create a lookup map for efficient access
         const agentById = Object.fromEntries(AGENTS.map(a => [a.id, a]));
-        const allAgents = AGENTS.map(a => a.id);
+
+        // Will be populated from server
+        let enabledAgents = [];
 
         const terminals = {};
         const websockets = {};
 
         // Determine current mode from URL
         const path = window.location.pathname.replace(/^\//, '').toLowerCase();
-        const singleAgent = allAgents.includes(path) ? path : null;
-        const activeAgents = singleAgent ? [singleAgent] : allAgents;
+        const singleAgent = path && agentById[path] ? path : null;
 
         function initTerminal(agent, container) {
             const term = new Terminal({
@@ -274,6 +295,13 @@
                 const res = await fetch('/api/status');
                 const data = await res.json();
 
+                // Update enabled agents list from server
+                const serverAgents = data.agents.map(a => a.name);
+                if (enabledAgents.length === 0) {
+                    // First fetch - initialize enabled agents
+                    enabledAgents = serverAgents;
+                }
+
                 let onlineCount = 0;
                 data.agents.forEach(agent => {
                     updateAgentStatus(agent.name, agent.state);
@@ -283,9 +311,11 @@
                 });
 
                 document.getElementById('global-status').textContent = `${onlineCount} Online`;
+                return data.agents;
             } catch (err) {
                 console.error('Failed to fetch status:', err);
                 document.getElementById('global-status').textContent = 'Disconnected';
+                return [];
             }
         }
 
@@ -365,11 +395,21 @@
         }
 
         // Initialize
-        function init() {
-            // Dynamically generate navigation links
+        async function init() {
+            // Fetch enabled agents from server first
+            const agents = await fetchStatus();
+            if (agents.length === 0) {
+                // Fallback to all agents if fetch failed
+                enabledAgents = AGENTS.map(a => a.id);
+            }
+
+            // Dynamically generate navigation links (only for enabled agents)
             const navContainer = document.querySelector('.nav-links');
             if (navContainer) {
-                AGENTS.forEach(agentData => {
+                enabledAgents.forEach(agentId => {
+                    const agentData = agentById[agentId];
+                    if (!agentData) return;
+
                     const navLink = document.createElement('a');
                     navLink.href = `/${agentData.id}`;
                     navLink.className = 'nav-link';
@@ -379,10 +419,16 @@
                 });
             }
 
-            // Dynamically generate agent panels for overview mode
+            // Dynamically generate agent panels for overview mode (only enabled agents)
             const overviewContainer = document.getElementById('overview-container');
             if (overviewContainer && !singleAgent) {
-                AGENTS.forEach(agentData => {
+                // Set grid layout based on agent count
+                overviewContainer.setAttribute('data-agent-count', enabledAgents.length);
+
+                enabledAgents.forEach(agentId => {
+                    const agentData = agentById[agentId];
+                    if (!agentData) return;
+
                     const panel = createAgentPanel(agentData.id);
                     if (panel) {
                         overviewContainer.appendChild(panel);
@@ -396,6 +442,7 @@
                 setupFullscreenMode(singleAgent);
             }
 
+            const activeAgents = singleAgent ? [singleAgent] : enabledAgents;
             activeAgents.forEach(agent => {
                 const container = document.getElementById(`${agent}-terminal`);
                 if (container) {
@@ -411,7 +458,7 @@
                 });
             });
 
-            fetchStatus();
+            // Status already fetched, just set interval for updates
             setInterval(fetchStatus, 5000);
         }
 

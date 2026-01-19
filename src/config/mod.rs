@@ -20,6 +20,11 @@ impl Default for Config {
                 command: "codex".to_string(),
                 args: vec![],
                 log_provider: "codex".to_string(),
+                ready_pattern: r"^(>|codex>)".to_string(),
+                error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
+                supports_cwd: true,
+                sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
+                sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
             },
         );
 
@@ -29,6 +34,11 @@ impl Default for Config {
                 command: "gemini".to_string(),
                 args: vec![],
                 log_provider: "gemini".to_string(),
+                ready_pattern: r"(Gemini|>\s*$)".to_string(),
+                error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
+                supports_cwd: true,
+                sentinel_template: "\u{200B}MSG_ID:{id}\u{200B}\n{message}".to_string(),
+                sentinel_regex: r"\u{200B}MSG_ID:([a-f0-9-]+)\u{200B}".to_string(),
             },
         );
 
@@ -38,6 +48,11 @@ impl Default for Config {
                 command: "opencode".to_string(),
                 args: vec![],
                 log_provider: "opencode".to_string(),
+                ready_pattern: r"(opencode|>\s*$)".to_string(),
+                error_patterns: vec!["ERROR".to_string(), "Exception".to_string()],
+                supports_cwd: true,
+                sentinel_template: "[[MSG:{id}]]\n{message}".to_string(),
+                sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
             },
         );
 
@@ -47,6 +62,15 @@ impl Default for Config {
                 command: "claude".to_string(),
                 args: vec![],
                 log_provider: "pty".to_string(), // PTY-only, no log file
+                ready_pattern: r"(?m)^>\s*$".to_string(),
+                error_patterns: vec![
+                    r"(?i)^error:".to_string(),
+                    r"(?i)^failed".to_string(),
+                    r"(?i)^fatal".to_string(),
+                ],
+                supports_cwd: false,
+                sentinel_template: "# CCGO_MSG_ID:{id}\n{message}".to_string(),
+                sentinel_regex: r"(?i)#\s*CCGO_MSG_ID:\s*([0-9a-f-]{36})".to_string(),
             },
         );
 
@@ -79,6 +103,11 @@ pub struct AgentConfig {
     pub command: String,
     pub args: Vec<String>,
     pub log_provider: String,
+    pub ready_pattern: String,
+    pub error_patterns: Vec<String>,
+    pub supports_cwd: bool,
+    pub sentinel_template: String,
+    pub sentinel_regex: String,
 }
 
 #[derive(Debug, Clone)]

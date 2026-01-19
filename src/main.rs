@@ -59,7 +59,11 @@ struct Cli {
     #[arg(long, default_value = "opencode", env = "CCGO_OPENCODE_CMD")]
     opencode_cmd: String,
 
-    /// Agents to enable (comma-separated: codex,gemini,opencode) [env: CCGO_AGENTS]
+    /// ClaudeCode command [env: CCGO_CLAUDECODE_CMD]
+    #[arg(long, default_value = "claude", env = "CCGO_CLAUDECODE_CMD")]
+    claudecode_cmd: String,
+
+    /// Agents to enable (comma-separated: codex,gemini,opencode,claudecode) [env: CCGO_AGENTS]
     #[arg(long, default_value = "codex,gemini,opencode", env = "CCGO_AGENTS")]
     agents: String,
 
@@ -123,6 +127,11 @@ fn build_config(cli: &Cli) -> Config {
                 command: cli.codex_cmd.clone(),
                 args: vec![],
                 log_provider: "codex".to_string(),
+                ready_pattern: r"^(>|codex>)".to_string(),
+                error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
+                supports_cwd: true,
+                sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
+                sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
             },
         );
     }
@@ -134,6 +143,11 @@ fn build_config(cli: &Cli) -> Config {
                 command: cli.gemini_cmd.clone(),
                 args: vec![],
                 log_provider: "gemini".to_string(),
+                ready_pattern: r"(Gemini|>\s*$)".to_string(),
+                error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
+                supports_cwd: true,
+                sentinel_template: "\u{200B}MSG_ID:{id}\u{200B}\n{message}".to_string(),
+                sentinel_regex: r"\u{200B}MSG_ID:([a-f0-9-]+)\u{200B}".to_string(),
             },
         );
     }
@@ -145,6 +159,31 @@ fn build_config(cli: &Cli) -> Config {
                 command: cli.opencode_cmd.clone(),
                 args: vec![],
                 log_provider: "opencode".to_string(),
+                ready_pattern: r"(opencode|>\s*$)".to_string(),
+                error_patterns: vec!["ERROR".to_string(), "Exception".to_string()],
+                supports_cwd: true,
+                sentinel_template: "[[MSG:{id}]]\n{message}".to_string(),
+                sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
+            },
+        );
+    }
+
+    if enabled_agents.contains(&"claudecode") {
+        agents.insert(
+            "claudecode".to_string(),
+            AgentConfig {
+                command: cli.claudecode_cmd.clone(),
+                args: vec![],
+                log_provider: "pty".to_string(),
+                ready_pattern: r"(?m)^>\s*$".to_string(),
+                error_patterns: vec![
+                    r"(?i)^error:".to_string(),
+                    r"(?i)^failed".to_string(),
+                    r"(?i)^fatal".to_string(),
+                ],
+                supports_cwd: false,
+                sentinel_template: "# CCGO_MSG_ID:{id}\n{message}".to_string(),
+                sentinel_regex: r"(?i)#\s*CCGO_MSG_ID:\s*([0-9a-f-]{36})".to_string(),
             },
         );
     }

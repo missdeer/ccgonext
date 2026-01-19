@@ -45,6 +45,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub struct ClaudeCodeAgent {
+    command: String,
+    args: Vec<String>,
     ready_pattern: String,
     ready_regex: Regex,
     error_patterns: Vec<String>,
@@ -56,7 +58,13 @@ pub struct ClaudeCodeAgent {
 
 impl ClaudeCodeAgent {
     pub fn new() -> Self {
+        Self::with_command("claude".to_string(), vec![])
+    }
+
+    pub fn with_command(command: String, args: Vec<String>) -> Self {
         Self {
+            command,
+            args,
             ready_pattern: r"(?m)^>\s*$".to_string(),
             ready_regex: Regex::new(r"(?m)^>\s*$").expect("valid ready regex"),
             error_patterns: vec![
@@ -225,7 +233,9 @@ impl Agent for ClaudeCodeAgent {
     fn get_startup_command(&self, _working_dir: &Path) -> Vec<String> {
         // Use simple command; working_dir is set via PTY spawn cwd
         // (portable_pty CommandBuilder::cwd is cross-platform and handles special chars)
-        vec!["claude".to_string()]
+        let mut cmd = vec![self.command.clone()];
+        cmd.extend(self.args.clone());
+        cmd
     }
 
     fn inject_message_sentinel(&self, message: &str, message_id: &str) -> String {

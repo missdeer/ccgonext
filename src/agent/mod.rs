@@ -5,14 +5,8 @@ use std::any::Any;
 use std::path::Path;
 
 mod claudecode;
-mod codex;
-mod gemini;
-mod opencode;
 
 pub use claudecode::ClaudeCodeAgent;
-pub use codex::CodexAgent;
-pub use gemini::GeminiAgent;
-pub use opencode::OpenCodeAgent;
 
 #[async_trait]
 pub trait Agent: Send + Sync {
@@ -45,6 +39,9 @@ pub struct GenericAgent {
     error_patterns: Vec<String>,
     command: String,
     args: Vec<String>,
+    supports_cwd: bool,
+    sentinel_template: String,
+    sentinel_regex: String,
 }
 
 impl GenericAgent {
@@ -54,6 +51,9 @@ impl GenericAgent {
         args: Vec<String>,
         ready_pattern: String,
         error_patterns: Vec<String>,
+        supports_cwd: bool,
+        sentinel_template: String,
+        sentinel_regex: String,
     ) -> Self {
         Self {
             name,
@@ -61,6 +61,9 @@ impl GenericAgent {
             error_patterns,
             command,
             args,
+            supports_cwd,
+            sentinel_template,
+            sentinel_regex,
         }
     }
 }
@@ -82,18 +85,21 @@ impl Agent for GenericAgent {
     fn get_startup_command(&self, working_dir: &Path) -> Vec<String> {
         let mut cmd = vec![self.command.clone()];
         cmd.extend(self.args.clone());
-        if working_dir.exists() {
-            // Some agents support --cwd or similar
+        if self.supports_cwd && working_dir.exists() {
+            cmd.push("--cwd".to_string());
+            cmd.push(working_dir.display().to_string());
         }
         cmd
     }
 
     fn inject_message_sentinel(&self, message: &str, message_id: &str) -> String {
-        format!("<<MSG_ID:{}>> {}", message_id, message)
+        self.sentinel_template
+            .replace("{id}", message_id)
+            .replace("{message}", message)
     }
 
     fn extract_sentinel_id(&self, output: &str) -> Option<String> {
-        let pattern = regex::Regex::new(r"<<MSG_ID:([a-f0-9-]+)>>").ok()?;
+        let pattern = regex::Regex::new(&self.sentinel_regex).ok()?;
         pattern.captures(output).map(|c| c[1].to_string())
     }
 
@@ -103,17 +109,23 @@ impl Agent for GenericAgent {
 }
 
 pub fn create_agent(name: &str, config: &crate::config::AgentConfig) -> Box<dyn Agent> {
-    match name {
-        "codex" => Box::new(CodexAgent::new()),
-        "gemini" => Box::new(GeminiAgent::new()),
-        "opencode" => Box::new(OpenCodeAgent::new()),
-        "claudecode" => Box::new(ClaudeCodeAgent::new()),
-        _ => Box::new(GenericAgent::new(
-            name.to_string(),
+    // ClaudeCode is special because it uses PTY-based parsing instead of log files
+    if name == "claudecode" {
+        return Box::new(ClaudeCodeAgent::with_command(
             config.command.clone(),
             config.args.clone(),
-            String::new(),
-            vec![],
-        )),
+        ));
     }
+
+    // All other agents use GenericAgent with configuration
+    Box::new(GenericAgent::new(
+        name.to_string(),
+        config.command.clone(),
+        config.args.clone(),
+        config.ready_pattern.clone(),
+        config.error_patterns.clone(),
+        config.supports_cwd,
+        config.sentinel_template.clone(),
+        config.sentinel_regex.clone(),
+    ))
 }

@@ -75,7 +75,8 @@ Options:
       --codex-cmd <CMD>       Codex command [env: CCGO_CODEX_CMD] [default: codex]
       --gemini-cmd <CMD>      Gemini command [env: CCGO_GEMINI_CMD] [default: gemini]
       --opencode-cmd <CMD>    OpenCode command [env: CCGO_OPENCODE_CMD] [default: opencode]
-      --agents <LIST>         Agents to enable (comma-separated) [env: CCGO_AGENTS] [default: codex,gemini,opencode]
+      --claudecode-cmd <CMD>  ClaudeCode command [env: CCGO_CLAUDECODE_CMD] [default: claude]
+      --agents <LIST>         Agents to enable (comma-separated: codex,gemini,opencode,claudecode) [env: CCGO_AGENTS] [default: codex,gemini,opencode]
   -h, --help                  Print help
   -V, --version               Print version
 ```
