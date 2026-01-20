@@ -391,32 +391,76 @@ impl PtyHandle {
         child.try_wait().map_err(|e| anyhow::anyhow!("{}", e))
     }
 
-    /// Graceful shutdown: send signal, wait briefly, then force kill
-    pub async fn shutdown(&self) {
-        // Signal shutdown to worker threads
-        self.shutdown.store(true, Ordering::SeqCst);
-        let _ = self.write_tx.send(PtyCommand::Shutdown).await;
-
-        // Try to kill the child process
-        if let Err(e) = self.kill().await {
-            tracing::warn!("Failed to kill child process: {}", e);
-        }
-
-        // Wait briefly for process to exit
-        let wait_result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+    /// Wait for process exit with timeout.
+    /// Uses polling since portable-pty's Child::wait() is synchronous and would
+    /// block the async runtime. The 100ms polling interval is a reasonable tradeoff
+    /// between responsiveness and CPU overhead (10 syscalls/sec).
+    async fn wait_for_exit(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<portable_pty::ExitStatus> {
+        let result = tokio::time::timeout(timeout, async {
             loop {
                 match self.try_wait().await {
-                    Ok(Some(_)) => return true,
-                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-                    Err(_) => return false,
+                    Ok(Some(status)) => return Some(status),
+                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                    Err(e) => {
+                        tracing::warn!("Error checking process status: {}", e);
+                        return None;
+                    }
                 }
             }
         })
         .await;
 
-        if wait_result.is_err() || wait_result == Ok(false) {
-            tracing::warn!("Child process did not exit gracefully");
+        result.ok().flatten()
+    }
+
+    /// Graceful shutdown: send /quit command, wait for agent to exit, then force kill if needed
+    pub async fn shutdown(&self) {
+        // Step 1: Send /quit command with timeout to prevent blocking on stuck PTY I/O
+        tracing::info!("Sending /quit command to agent...");
+        let quit_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), self.write_line("/quit")).await;
+
+        match quit_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("Failed to send /quit command: {}", e),
+            Err(_) => tracing::warn!("/quit command timed out, PTY may be blocked"),
         }
+
+        // Step 2: Wait up to 5 seconds for process to exit gracefully
+        if let Some(status) = self.wait_for_exit(std::time::Duration::from_secs(5)).await {
+            tracing::info!("Agent exited gracefully with status: {:?}", status);
+        } else {
+            // Step 3: Force kill if still running
+            tracing::warn!("Agent did not exit after /quit, force killing...");
+
+            if let Err(e) = self.kill().await {
+                tracing::warn!("Failed to kill child process: {}", e);
+            }
+
+            // Wait briefly for process to exit after kill
+            if self
+                .wait_for_exit(std::time::Duration::from_millis(500))
+                .await
+                .is_none()
+            {
+                tracing::error!("Child process did not exit even after force kill");
+            }
+        }
+
+        // Signal shutdown to worker threads AFTER process termination.
+        // This ordering ensures I/O loops remain active to capture any final
+        // output from the dying process before we tear down the channels.
+        self.shutdown.store(true, Ordering::SeqCst);
+
+        // Use timeout to prevent blocking if channel is full or writer is stuck
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.write_tx.send(PtyCommand::Shutdown),
+        )
+        .await;
     }
 }
 
