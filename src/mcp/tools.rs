@@ -11,7 +11,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
 
 const VALID_AGENTS: &[&str] = &["codex", "gemini", "opencode", "claudecode"];
 const DEFAULT_TIMEOUT: u64 = 600;
@@ -153,34 +152,25 @@ async fn execute_ask_agents(
 
         let handle = join_set.spawn(async move {
             let result = AssertUnwindSafe(async {
-                // Single timeout layer - don't pass timeout to ask_single_agent
-                timeout(
-                    timeout_duration,
-                    ask_single_agent(&agent, &message, None, &sm),
-                )
-                .await
+                // Pass timeout to ask_single_agent to ensure ReplyDetection uses it
+                // This prevents ReplyDetection from continuing beyond the MCP timeout
+                ask_single_agent(&agent, &message, Some(timeout_duration), &sm).await
             })
             .catch_unwind()
             .await;
 
             let agent_result = match result {
-                Ok(Ok(Ok(response))) => AgentResult {
+                Ok(Ok(response)) => AgentResult {
                     agent: agent.clone(),
                     success: true,
                     response: Some(response),
                     error: None,
                 },
-                Ok(Ok(Err(e))) => AgentResult {
+                Ok(Err(e)) => AgentResult {
                     agent: agent.clone(),
                     success: false,
                     response: None,
                     error: Some(e.to_string()),
-                },
-                Ok(Err(_elapsed)) => AgentResult {
-                    agent: agent.clone(),
-                    success: false,
-                    response: None,
-                    error: Some(format!("timeout after {}s", timeout_duration.as_secs())),
                 },
                 Err(panic_err) => {
                     let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {

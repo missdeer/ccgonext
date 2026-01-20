@@ -1,6 +1,6 @@
 //! Agent state machine implementation
 //!
-//! States: STOPPED -> STARTING -> IDLE/READY_TIMEOUT -> BUSY -> STUCK -> DEAD
+//! States: STOPPED -> STARTING -> IDLE/READY_TIMEOUT -> BUSY -> IDLE -> DEAD
 
 use std::fmt;
 
@@ -176,13 +176,10 @@ impl StateMachine {
                 side_effects: vec![SideEffect::ReturnResult],
             }),
 
-            // BUSY -> STUCK (timeout)
+            // BUSY -> IDLE (timeout)
             (AgentState::Busy, StateTransition::RequestTimeout) => Ok(TransitionResult {
-                new_state: AgentState::Stuck,
-                side_effects: vec![
-                    SideEffect::ReturnTimeoutError,
-                    SideEffect::StartBackgroundRecovery,
-                ],
+                new_state: AgentState::Idle,
+                side_effects: vec![SideEffect::ReturnTimeoutError],
             }),
 
             // BUSY -> IDLE (interrupted)
@@ -282,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn test_busy_to_stuck() {
+    fn test_busy_to_idle_on_timeout() {
         let result = StateMachine::transition(AgentState::Busy, StateTransition::RequestTimeout);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().new_state, AgentState::Stuck);
+        assert_eq!(result.unwrap().new_state, AgentState::Idle);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use ccgo::agent::{ClaudeCodeAgent, GenericAgent};
 use ccgo::config::{AgentConfig, TimeoutConfig};
-use ccgo::log_provider::{HistoryEntry, LogEntry, LogProvider};
+use ccgo::log_provider::{HistoryEntry, LockedSession, LogEntry, LogProvider};
 use ccgo::pty::PtyManager;
 use ccgo::session::AgentSession;
 use std::path::PathBuf;
@@ -38,6 +38,12 @@ impl LogProvider for MockLogProvider {
     fn get_watch_path(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    async fn lock_session(&self) -> Option<LockedSession> {
+        None
+    }
+
+    async fn unlock_session(&self) {}
 }
 
 #[tokio::test]

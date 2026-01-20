@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -215,10 +215,13 @@ impl AgentSession {
             }
         };
 
+        // Subscribe to output BEFORE storing PTY to avoid missing initial output
+        let pty_rx = pty.subscribe_output();
+
         *self.pty.write().await = Some(pty);
 
-        // Start ready detection task
-        Arc::clone(self).start_ready_detection().await;
+        // Start ready detection task with pre-subscribed receiver
+        Arc::clone(self).start_ready_detection_with_rx(pty_rx).await;
 
         Ok(())
     }
@@ -279,6 +282,79 @@ impl AgentSession {
         }))
     }
 
+    async fn start_ready_detection_with_rx(self: &Arc<Self>, rx: broadcast::Receiver<Vec<u8>>) {
+        let ready_pattern = self.adapter.get_ready_pattern().to_string();
+        let timeout = Duration::from_secs(self.timeouts.ready_check);
+        let name = self.name.clone();
+        let session = Arc::clone(self);
+
+        let state = self.state.read().await;
+        if *state != AgentState::Starting {
+            return;
+        }
+        drop(state);
+
+        // Compile regex pattern
+        let pattern = match regex::Regex::new(&ready_pattern) {
+            Ok(re) => re,
+            Err(e) => {
+                tracing::warn!(
+                    "Invalid ready pattern '{}' for {}: {}, using substring match",
+                    ready_pattern,
+                    name,
+                    e
+                );
+                // Fall back to substring matching if regex is invalid
+                regex::Regex::new(&regex::escape(&ready_pattern)).unwrap()
+            }
+        };
+
+        let mut rx = rx;
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + timeout;
+            let poll_interval = Duration::from_millis(100);
+
+            // Accumulate output for pattern matching across chunks
+            let mut accumulated = String::new();
+
+            while Instant::now() < deadline {
+                // Check for ready pattern in PTY output
+                match tokio::time::timeout(poll_interval, rx.recv()).await {
+                    Ok(Ok(data)) => {
+                        let text = String::from_utf8_lossy(&data);
+                        accumulated.push_str(&text);
+                        tracing::debug!("PTY output for {}: {:?}", name, text);
+
+                        // Check both current chunk and accumulated output
+                        if pattern.is_match(&text) || pattern.is_match(&accumulated) {
+                            tracing::info!("Ready pattern detected for {}", name);
+                            if let Err(e) = session
+                                .apply_transition(StateTransition::ReadyDetected)
+                                .await
+                            {
+                                tracing::warn!("Failed to apply ReadyDetected: {}", e);
+                            }
+                            return;
+                        }
+                    }
+                    Ok(Err(_)) => break, // Channel closed
+                    Err(_) => continue,  // Timeout, keep polling
+                }
+            }
+
+            // Ready detection timed out
+            tracing::warn!("Ready detection timed out for {}", name);
+            if let Err(e) = session
+                .apply_transition(StateTransition::ReadyTimeout)
+                .await
+            {
+                tracing::warn!("Failed to apply ReadyTimeout: {}", e);
+            }
+        });
+    }
+
+    #[allow(dead_code)]
     async fn start_ready_detection(self: &Arc<Self>) {
         let ready_pattern = self.adapter.get_ready_pattern().to_string();
         let timeout = Duration::from_secs(self.timeouts.ready_check);
@@ -317,12 +393,19 @@ impl AgentSession {
             let poll_interval = Duration::from_millis(100);
 
             if let Some(mut rx) = pty_rx {
+                // Also accumulate output for pattern matching across chunks
+                let mut accumulated = String::new();
+
                 while Instant::now() < deadline {
                     // Check for ready pattern in PTY output
                     match tokio::time::timeout(poll_interval, rx.recv()).await {
                         Ok(Ok(data)) => {
                             let text = String::from_utf8_lossy(&data);
-                            if pattern.is_match(&text) {
+                            accumulated.push_str(&text);
+                            tracing::debug!("PTY output for {}: {:?}", name, text);
+
+                            // Check both current chunk and accumulated output
+                            if pattern.is_match(&text) || pattern.is_match(&accumulated) {
                                 tracing::info!("Ready pattern detected for {}", name);
                                 if let Err(e) = session
                                     .apply_transition(StateTransition::ReadyDetected)
@@ -453,6 +536,23 @@ impl AgentSession {
             self.start_with_retry(pty_manager).await?;
         }
 
+        // Wait for agent to become ready (Idle or ReadyTimeout)
+        let ready_timeout = Duration::from_secs(self.timeouts.ready_check);
+        let ready_deadline = Instant::now() + ready_timeout;
+        loop {
+            let state = self.get_state().await;
+            if state.can_accept_request() {
+                break;
+            }
+            if !state.is_running() {
+                return Err(SessionError::NotRunning);
+            }
+            if Instant::now() >= ready_deadline {
+                return Err(SessionError::QueueTimeout);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
         let (tx, rx) = oneshot::channel();
         let request = Request::new(message, timeout, tx);
 
@@ -532,8 +632,18 @@ impl AgentSession {
             .adapter
             .inject_message_sentinel(&request.message, &message_id);
 
-        // Get baseline offset for log detection
-        let baseline_offset = self.log_provider.get_current_offset().await;
+        // Lock session and get baseline offset for log detection
+        let baseline_offset = if let Some(locked) = self.log_provider.lock_session().await {
+            tracing::debug!(
+                "Sending message pending to {}, locked session: {:?}",
+                self.name,
+                locked.file_path
+            );
+            locked.baseline_offset
+        } else {
+            tracing::debug!("Sending message pending to {}", self.name);
+            self.log_provider.get_current_offset().await
+        };
 
         // Get PTY offset for ClaudeCode parsing (before writing)
         let pty_start_offset = {
@@ -567,8 +677,9 @@ impl AgentSession {
         // Check if PTY exists
         let pty_guard = self.pty.read().await;
         let Some(pty) = pty_guard.as_ref() else {
-            // No PTY, clear current request and transition back
+            // No PTY, unlock session and clear current request
             drop(pty_guard);
+            self.log_provider.unlock_session().await;
             {
                 let mut current_req = self.current_request.lock().await;
                 if let Some(req) = current_req.take() {
@@ -587,7 +698,8 @@ impl AgentSession {
         // Send message to PTY
         if let Err(e) = pty.write_line(&prepared.message_with_sentinel).await {
             drop(pty_guard);
-            // PTY write failed, clear current request and transition back
+            // PTY write failed, unlock session and clear current request
+            self.log_provider.unlock_session().await;
             {
                 let mut current_req = self.current_request.lock().await;
                 if let Some(req) = current_req.take() {
@@ -658,6 +770,13 @@ impl AgentSession {
         let log_provider = session.log_provider.clone();
         let name = session.name.clone();
 
+        tracing::info!(
+            "[ReplyDetection] Starting for agent={}, baseline_offset={}, timeout={:?}",
+            name,
+            baseline_offset,
+            timeout
+        );
+
         tokio::spawn(async move {
             let deadline = Instant::now() + timeout;
 
@@ -668,80 +787,162 @@ impl AgentSession {
 
             // Try to subscribe to file change events with debouncing
             let subscription = log_provider.subscribe_changes(DEBOUNCE_MS);
+            tracing::debug!(
+                "[ReplyDetection] File watcher subscription for {}: {}",
+                name,
+                if subscription.is_some() {
+                    "active"
+                } else {
+                    "unavailable"
+                }
+            );
 
             // Initial check (handle changes that occurred before watcher started)
+            tracing::debug!("[ReplyDetection] Performing initial check for {}", name);
             if let Some(entry) = log_provider.get_latest_reply(baseline_offset).await {
-                tracing::debug!("Reply detected for {}: {}", name, entry.content);
+                tracing::info!(
+                    "[ReplyDetection] Reply detected on initial check for {}: {} bytes",
+                    name,
+                    entry.content.len()
+                );
                 Self::deliver_reply(&session, entry).await;
                 return;
             }
+            tracing::debug!(
+                "[ReplyDetection] No reply on initial check for {}, entering wait loop",
+                name
+            );
 
             match subscription {
                 Some(mut sub) => {
-                    // Event-driven mode with debouncing
+                    // Event-driven mode with periodic polling as a safety net
+                    tracing::debug!("[ReplyDetection] Using event-driven mode for {}", name);
+                    let poll_interval = Duration::from_millis(FALLBACK_POLL_MS);
                     loop {
                         let remaining = deadline.saturating_duration_since(Instant::now());
                         if remaining.is_zero() {
+                            tracing::warn!(
+                                "[ReplyDetection] Timeout reached for {} in event mode",
+                                name
+                            );
                             drop(sub.handle); // Cancel watcher
                             Self::handle_reply_timeout(&session, &name).await;
                             return;
                         }
 
-                        tokio::select! {
-                            result = sub.receiver.recv() => {
-                                match result {
-                                    Ok(_event) => {
-                                        // File changed, check for reply
-                                        if let Some(entry) = log_provider.get_latest_reply(baseline_offset).await {
-                                            tracing::debug!("Reply detected for {}: {}", name, entry.content);
-                                            drop(sub.handle); // Cancel watcher
-                                            Self::deliver_reply(&session, entry).await;
-                                            return;
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                        // Missed some events, check now
-                                        if let Some(entry) = log_provider.get_latest_reply(baseline_offset).await {
-                                            tracing::debug!("Reply detected for {}: {}", name, entry.content);
-                                            drop(sub.handle);
-                                            Self::deliver_reply(&session, entry).await;
-                                            return;
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                        // Watcher closed, fall back to polling
-                                        tracing::warn!("File watcher closed for {}, falling back to polling", name);
-                                        break;
-                                    }
+                        let wait = if remaining < poll_interval {
+                            remaining
+                        } else {
+                            poll_interval
+                        };
+
+                        match tokio::time::timeout(wait, sub.receiver.recv()).await {
+                            Ok(Ok(_event)) => {
+                                tracing::debug!(
+                                    "[ReplyDetection] File change event received for {}",
+                                    name
+                                );
+                                // File changed, check for reply
+                                if let Some(entry) =
+                                    log_provider.get_latest_reply(baseline_offset).await
+                                {
+                                    tracing::info!(
+                                        "[ReplyDetection] Reply detected for {}: {} bytes",
+                                        name,
+                                        entry.content.len()
+                                    );
+                                    drop(sub.handle); // Cancel watcher
+                                    Self::deliver_reply(&session, entry).await;
+                                    return;
+                                }
+                                tracing::debug!(
+                                    "[ReplyDetection] No reply found after file change for {}",
+                                    name
+                                );
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                                tracing::warn!(
+                                    "[ReplyDetection] Missed {} events for {}, checking now",
+                                    n,
+                                    name
+                                );
+                                // Missed some events, check now
+                                if let Some(entry) =
+                                    log_provider.get_latest_reply(baseline_offset).await
+                                {
+                                    tracing::info!(
+                                        "[ReplyDetection] Reply detected (lagged) for {}: {} bytes",
+                                        name,
+                                        entry.content.len()
+                                    );
+                                    drop(sub.handle);
+                                    Self::deliver_reply(&session, entry).await;
+                                    return;
                                 }
                             }
-                            _ = tokio::time::sleep(remaining) => {
-                                drop(sub.handle);
-                                Self::handle_reply_timeout(&session, &name).await;
-                                return;
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                // Watcher closed, fall back to polling
+                                tracing::warn!("[ReplyDetection] File watcher closed for {}, falling back to polling", name);
+                                break;
+                            }
+                            Err(_) => {
+                                // Periodic poll when no file events arrive
+                                if let Some(entry) =
+                                    log_provider.get_latest_reply(baseline_offset).await
+                                {
+                                    tracing::info!(
+                                        "[ReplyDetection] Reply detected (poll) for {}: {} bytes",
+                                        name,
+                                        entry.content.len()
+                                    );
+                                    drop(sub.handle);
+                                    Self::deliver_reply(&session, entry).await;
+                                    return;
+                                }
+                                tracing::debug!(
+                                    "[ReplyDetection] No reply found during periodic poll for {}",
+                                    name
+                                );
                             }
                         }
                     }
                 }
                 None => {
                     tracing::debug!(
-                        "File watching not available for {}, using fallback polling",
+                        "[ReplyDetection] File watching not available for {}, using fallback polling",
                         name
                     );
                 }
             }
 
             // Fallback: polling mode (used when file watching is unavailable)
+            tracing::debug!(
+                "[ReplyDetection] Entering polling mode for {} with {}ms interval",
+                name,
+                FALLBACK_POLL_MS
+            );
             let poll_interval = Duration::from_millis(FALLBACK_POLL_MS);
+            let mut poll_count = 0u32;
             while Instant::now() < deadline {
+                poll_count += 1;
+                tracing::debug!("[ReplyDetection] Poll #{} for {}", poll_count, name);
                 if let Some(entry) = log_provider.get_latest_reply(baseline_offset).await {
-                    tracing::debug!("Reply detected for {}: {}", name, entry.content);
+                    tracing::info!(
+                        "[ReplyDetection] Reply detected (poll) for {}: {} bytes",
+                        name,
+                        entry.content.len()
+                    );
                     Self::deliver_reply(&session, entry).await;
                     return;
                 }
                 tokio::time::sleep(poll_interval).await;
             }
 
+            tracing::warn!(
+                "[ReplyDetection] Final timeout after {} polls for {}",
+                poll_count,
+                name
+            );
             Self::handle_reply_timeout(&session, &name).await;
         });
     }
@@ -811,6 +1012,9 @@ impl AgentSession {
     }
 
     async fn deliver_reply(session: &Arc<Self>, entry: crate::log_provider::LogEntry) {
+        // Unlock session after reply detection completes
+        session.log_provider.unlock_session().await;
+
         // Deliver result to waiting request
         {
             let mut current_req = session.current_request.lock().await;
@@ -832,6 +1036,9 @@ impl AgentSession {
     }
 
     async fn deliver_reply_error(session: &Arc<Self>, error: SessionError) {
+        // Unlock session after reply detection completes
+        session.log_provider.unlock_session().await;
+
         {
             let mut current_req = session.current_request.lock().await;
             if let Some(req) = current_req.take() {
@@ -850,7 +1057,26 @@ impl AgentSession {
     }
 
     async fn handle_reply_timeout(session: &Arc<Self>, name: &str) {
+        // Unlock session after reply detection completes
+        session.log_provider.unlock_session().await;
+
         tracing::warn!("Reply detection timed out for {}", name);
+
+        // Best-effort cancel: send Ctrl+C (or agent-specific interrupt) so the session can accept
+        // subsequent requests without mixing output from a still-running generation.
+        let pty = {
+            let pty_guard = session.pty.read().await;
+            pty_guard.as_ref().cloned()
+        };
+        if let Some(pty) = pty {
+            if let Err(e) = pty.write(session.adapter.get_interrupt_sequence()).await {
+                tracing::warn!(
+                    "Failed to send interrupt sequence after timeout for {}: {}",
+                    name,
+                    e
+                );
+            }
+        }
         {
             let mut current_req = session.current_request.lock().await;
             if let Some(req) = current_req.take() {
@@ -864,6 +1090,9 @@ impl AgentSession {
         {
             tracing::warn!("Failed to apply RequestTimeout: {}", e);
         }
+
+        // Process next request in queue (critical: ensures queue is not blocked after timeout)
+        let _ = session.process_next_request().await;
     }
 }
 
@@ -905,6 +1134,36 @@ impl SessionManager {
 
     pub fn pty_manager(&self) -> &Arc<crate::pty::PtyManager> {
         &self.pty_manager
+    }
+
+    /// Start all registered agents in parallel
+    pub async fn start_all(&self) {
+        let sessions: Vec<_> = self.sessions.read().await.values().cloned().collect();
+        if sessions.is_empty() {
+            return;
+        }
+
+        tracing::info!("Pre-starting {} agents...", sessions.len());
+
+        let pty_manager = &self.pty_manager;
+        let mut handles = Vec::with_capacity(sessions.len());
+
+        for session in sessions {
+            let pty_mgr = Arc::clone(pty_manager);
+            handles.push(tokio::spawn(async move {
+                let name = session.name.clone();
+                match session.start_with_retry(&pty_mgr).await {
+                    Ok(()) => tracing::info!("Agent {} started", name),
+                    Err(e) => tracing::warn!("Failed to pre-start agent {}: {}", name, e),
+                }
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        tracing::info!("All agents pre-started");
     }
 
     /// Shutdown all sessions and their PTY processes

@@ -35,6 +35,7 @@ futures-util = "0.3"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # Utilities
 thiserror = "2.0"
@@ -48,6 +49,8 @@ notify = "7.0"
 parking_lot = "0.12"
 bytes = "1.9"
 futures = "0.3"
+crossterm = "0.27"
+sha2 = "0.10"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

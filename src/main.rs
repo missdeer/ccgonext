@@ -12,7 +12,7 @@ use ccgo::{
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
 #[command(name = "ccgo")]
@@ -74,6 +74,14 @@ struct Cli {
     /// Base delay in milliseconds for exponential backoff between retries [env: CCGO_START_RETRY_DELAY]
     #[arg(long, default_value = "1000", env = "CCGO_START_RETRY_DELAY")]
     start_retry_delay: u64,
+
+    /// Log file path (optional, if not set logs only go to stderr) [env: CCGO_LOG_FILE]
+    #[arg(long, env = "CCGO_LOG_FILE")]
+    log_file: Option<String>,
+
+    /// Log directory for rotating logs [env: CCGO_LOG_DIR]
+    #[arg(long, env = "CCGO_LOG_DIR")]
+    log_dir: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -88,16 +96,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ccgo=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize tracing with optional file output
+    init_tracing(&cli);
+
     let config = Arc::new(build_config(&cli));
 
     match cli.command {
@@ -115,6 +118,57 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn init_tracing(cli: &Cli) {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "ccgo=debug,tower_http=debug".into());
+
+    let stderr_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
+
+    if let Some(log_dir) = &cli.log_dir {
+        // Rotating file appender (daily rotation)
+        let file_appender = tracing_appender::rolling::daily(log_dir, "ccgo.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        let file_layer = fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(non_blocking);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+
+        // Leak the guard to keep it alive for the program lifetime
+        std::mem::forget(_guard);
+    } else if let Some(log_file) = &cli.log_file {
+        // Single file appender
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .expect("Failed to open log file");
+
+        let file_layer = fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(std::sync::Arc::new(file));
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+    } else {
+        // Stderr only
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stderr_layer)
+            .init();
+    }
+}
+
 fn build_config(cli: &Cli) -> Config {
     let enabled_agents: Vec<&str> = cli.agents.split(',').map(|s| s.trim()).collect();
 
@@ -129,7 +183,7 @@ fn build_config(cli: &Cli) -> Config {
                 log_provider: "codex".to_string(),
                 ready_pattern: r"^(>|codex>)".to_string(),
                 error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
-                supports_cwd: true,
+                supports_cwd: false,
                 sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
                 sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
             },
@@ -145,7 +199,7 @@ fn build_config(cli: &Cli) -> Config {
                 log_provider: "gemini".to_string(),
                 ready_pattern: r"(Gemini|>\s*$)".to_string(),
                 error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
-                supports_cwd: true,
+                supports_cwd: false,
                 sentinel_template: "\u{200B}MSG_ID:{id}\u{200B}\n{message}".to_string(),
                 sentinel_regex: r"\u{200B}MSG_ID:([a-f0-9-]+)\u{200B}".to_string(),
             },
@@ -161,7 +215,7 @@ fn build_config(cli: &Cli) -> Config {
                 log_provider: "opencode".to_string(),
                 ready_pattern: r"(opencode|>\s*$)".to_string(),
                 error_patterns: vec!["ERROR".to_string(), "Exception".to_string()],
-                supports_cwd: true,
+                supports_cwd: false,
                 sentinel_template: "[[MSG:{id}]]\n{message}".to_string(),
                 sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
             },
@@ -286,24 +340,40 @@ async fn create_session_manager(config: &Config) -> anyhow::Result<Arc<SessionMa
     let pty_manager = Arc::new(PtyManager::new(config.web.output_buffer_size));
     let session_manager = Arc::new(SessionManager::new(pty_manager));
 
+    let working_dir = std::env::current_dir()?;
+    tracing::info!("Working directory for agents: {:?}", working_dir);
+
     // Register configured agents
     for (name, agent_config) in &config.agents {
         let adapter = agent::create_agent(name, agent_config);
 
+        // Create config with working_dir for LogProvider
+        let mut log_config = std::collections::HashMap::new();
+        log_config.insert(
+            "working_dir".to_string(),
+            working_dir.to_string_lossy().to_string(),
+        );
+
         let log_provider: Arc<dyn log_provider::LogProvider> = Arc::from(
-            log_provider::create_log_provider(&agent_config.log_provider, None),
+            log_provider::create_log_provider(&agent_config.log_provider, Some(&log_config)),
         );
 
         let session = AgentSession::new(
             name.clone(),
             Arc::from(adapter),
             log_provider,
-            std::env::current_dir()?,
+            working_dir.clone(),
             config.timeouts.clone(),
         );
 
         session_manager.register(session).await;
     }
+
+    // Pre-start all agents in background (non-blocking)
+    let sm = session_manager.clone();
+    tokio::spawn(async move {
+        sm.start_all().await;
+    });
 
     Ok(session_manager)
 }

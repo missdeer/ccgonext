@@ -117,6 +117,13 @@ pub struct HistoryEntry {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Locked session info returned by lock_session
+#[derive(Debug, Clone)]
+pub struct LockedSession {
+    pub file_path: std::path::PathBuf,
+    pub baseline_offset: u64,
+}
+
 #[async_trait]
 pub trait LogProvider: Send + Sync {
     async fn get_latest_reply(&self, since_offset: u64) -> Option<LogEntry>;
@@ -128,6 +135,15 @@ pub trait LogProvider: Send + Sync {
     fn get_inode(&self) -> Option<u64>;
 
     fn get_watch_path(&self) -> Option<std::path::PathBuf>;
+
+    /// Lock the current session file and return baseline offset.
+    /// This ensures that subsequent get_latest_reply calls use the same session file.
+    /// Call this before sending a message to the agent.
+    async fn lock_session(&self) -> Option<LockedSession>;
+
+    /// Unlock the session, allowing the provider to track new session files.
+    /// Call this after reply detection completes (success or timeout).
+    async fn unlock_session(&self);
 
     fn subscribe_changes(&self, debounce_ms: u64) -> Option<WatchSubscription> {
         let path = self.get_watch_path()?;
@@ -162,16 +178,35 @@ impl LogProvider for NullLogProvider {
     fn get_watch_path(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    async fn lock_session(&self) -> Option<LockedSession> {
+        None
+    }
+
+    async fn unlock_session(&self) {}
 }
 
 pub fn create_log_provider(
     provider_type: &str,
     config: Option<&HashMap<String, String>>,
 ) -> Box<dyn LogProvider> {
-    match provider_type {
-        "CodexLogProvider" => Box::new(CodexLogProvider::new(config)),
-        "GeminiLogProvider" => Box::new(GeminiLogProvider::new(config)),
-        "OpenCodeLogProvider" => Box::new(OpenCodeLogProvider::new(config)),
-        _ => Box::new(NullLogProvider),
+    tracing::debug!(
+        "[LogProvider] Creating provider type='{}' with config={:?}",
+        provider_type,
+        config
+    );
+
+    match provider_type.to_lowercase().as_str() {
+        "codex" | "codexlogprovider" => Box::new(CodexLogProvider::new(config)),
+        "gemini" | "geminilogprovider" => Box::new(GeminiLogProvider::new(config)),
+        "opencode" | "opencodelogprovider" => Box::new(OpenCodeLogProvider::new(config)),
+        "pty" | "null" => Box::new(NullLogProvider),
+        _ => {
+            tracing::warn!(
+                "[LogProvider] Unknown provider type '{}', using NullLogProvider",
+                provider_type
+            );
+            Box::new(NullLogProvider)
+        }
     }
 }

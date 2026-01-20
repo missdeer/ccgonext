@@ -12,6 +12,61 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 
+/// Adapt command for Windows execution.
+/// On Windows, Node.js CLI tools (codex, gemini, etc.) are installed as .cmd batch files.
+/// CreateProcessW cannot directly execute .cmd/.ps1 files, so we wrap them appropriately:
+/// - .ps1 files are executed with powershell.exe
+/// - .cmd/.bat and bare commands are wrapped with cmd.exe /c
+///
+/// Security note: We use `-ExecutionPolicy Bypass` for PowerShell scripts. This is a
+/// deliberate trade-off for developer convenience in an automation tool context.
+/// The alternative (`RemoteSigned`) would require users to configure their system
+/// or sign scripts, which creates friction for local development workflows.
+/// This does NOT elevate privileges - it only affects script execution policy.
+#[cfg(windows)]
+fn adapt_command_for_windows(command: &[String]) -> Vec<String> {
+    if command.is_empty() {
+        return command.to_vec();
+    }
+
+    let program = &command[0];
+    let lower = program.to_lowercase();
+
+    // .exe files can be executed directly by CreateProcessW
+    if lower.ends_with(".exe") {
+        return command.to_vec();
+    }
+
+    // .ps1 files need PowerShell
+    // -NoProfile: Don't load user profile (faster, avoids side effects)
+    // -NonInteractive: Don't prompt for input (required for automation)
+    // -ExecutionPolicy Bypass: Allow script execution (see security note above)
+    // -File: Execute the script file
+    if lower.ends_with(".ps1") {
+        let mut adapted = vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+        ];
+        adapted.extend(command.iter().cloned());
+        return adapted;
+    }
+
+    // Everything else (bare commands, .cmd, .bat, .com) needs cmd.exe /c
+    // This lets Windows resolve the command via PATH and PATHEXT
+    let mut adapted = vec!["cmd.exe".to_string(), "/c".to_string()];
+    adapted.extend(command.iter().cloned());
+    adapted
+}
+
+#[cfg(not(windows))]
+fn adapt_command_for_windows(command: &[String]) -> Vec<String> {
+    command.to_vec()
+}
+
 /// PTY buffer with absolute offset tracking
 /// This ensures offset-based response correlation remains correct under buffer trimming
 pub struct PtyBuffer {
@@ -121,6 +176,9 @@ impl PtyHandle {
             anyhow::bail!("Empty command");
         }
 
+        // Adapt command for Windows (.cmd/.bat script support)
+        let command = adapt_command_for_windows(command);
+
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: DEFAULT_ROWS,
@@ -132,6 +190,11 @@ impl PtyHandle {
         let mut cmd = CommandBuilder::new(&command[0]);
         for arg in &command[1..] {
             cmd.arg(arg);
+        }
+
+        // Inherit environment variables from current process
+        for (key, value) in std::env::vars() {
+            cmd.env(key, value);
         }
 
         if working_dir.exists() {
@@ -243,8 +306,40 @@ impl PtyHandle {
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?
     }
 
+    /// Send text followed by Enter key to the PTY.
+    ///
+    /// Uses a two-step approach similar to terminal multiplexers (tmux/WezTerm):
+    /// 1. Send the text content
+    /// 2. Brief delay to let TUI process the input
+    /// 3. Send Enter key (CR byte)
+    ///
+    /// This ensures proper handling by TUI applications running in raw mode.
     pub async fn write_line(&self, line: &str) -> Result<()> {
-        self.write(format!("{}\n", line).as_bytes()).await
+        let has_newlines = line.contains('\n');
+
+        if has_newlines {
+            // Multi-line: use bracketed paste to prevent line-by-line execution
+            // Send paste start sequence
+            self.write(b"\x1b[200~").await?;
+
+            // Send content
+            self.write(line.as_bytes()).await?;
+
+            // Send paste end sequence
+            self.write(b"\x1b[201~").await?;
+
+            // Brief delay to let TUI process bracketed paste content
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        } else {
+            // Single-line: send directly
+            self.write(line.as_bytes()).await?;
+
+            // Brief delay to let TUI process input
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Send Enter key (CR byte triggers input submission in most TUIs)
+        self.write(b"\r").await
     }
 
     pub fn subscribe_output(&self) -> broadcast::Receiver<Vec<u8>> {
@@ -567,5 +662,77 @@ mod tests {
     async fn test_pty_manager_buffer_limit() {
         let manager = PtyManager::new(512);
         assert_eq!(manager.buffer_limit(), 512);
+    }
+
+    #[test]
+    fn test_adapt_command_for_windows() {
+        // Empty command
+        let empty: Vec<String> = vec![];
+        assert_eq!(adapt_command_for_windows(&empty), empty);
+
+        // Command with .exe extension should pass through
+        let exe_cmd = vec!["node.exe".to_string(), "--version".to_string()];
+        assert_eq!(adapt_command_for_windows(&exe_cmd), exe_cmd);
+
+        // Command with absolute path ending in .exe should pass through
+        let abs_path = vec!["C:\\Program Files\\node.exe".to_string()];
+        assert_eq!(adapt_command_for_windows(&abs_path), abs_path);
+
+        // .cmd/.bat files should be wrapped with cmd.exe /c on Windows
+        let cmd_cmd = vec!["codex.cmd".to_string(), "exec".to_string()];
+        let adapted_cmd = adapt_command_for_windows(&cmd_cmd);
+        #[cfg(windows)]
+        {
+            assert_eq!(adapted_cmd.len(), 4);
+            assert_eq!(adapted_cmd[0], "cmd.exe");
+            assert_eq!(adapted_cmd[1], "/c");
+            assert_eq!(adapted_cmd[2], "codex.cmd");
+            assert_eq!(adapted_cmd[3], "exec");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(adapted_cmd, cmd_cmd);
+        }
+
+        // .ps1 files should be wrapped with powershell.exe on Windows
+        let ps1_cmd = vec![
+            "script.ps1".to_string(),
+            "-Param".to_string(),
+            "value".to_string(),
+        ];
+        let adapted_ps1 = adapt_command_for_windows(&ps1_cmd);
+        #[cfg(windows)]
+        {
+            assert_eq!(adapted_ps1.len(), 9);
+            assert_eq!(adapted_ps1[0], "powershell.exe");
+            assert_eq!(adapted_ps1[1], "-NoProfile");
+            assert_eq!(adapted_ps1[2], "-NonInteractive");
+            assert_eq!(adapted_ps1[3], "-ExecutionPolicy");
+            assert_eq!(adapted_ps1[4], "Bypass");
+            assert_eq!(adapted_ps1[5], "-File");
+            assert_eq!(adapted_ps1[6], "script.ps1");
+            assert_eq!(adapted_ps1[7], "-Param");
+            assert_eq!(adapted_ps1[8], "value");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(adapted_ps1, ps1_cmd);
+        }
+
+        // Plain command should be wrapped on Windows, passed through on other platforms
+        let plain_cmd = vec!["codex".to_string(), "--help".to_string()];
+        let adapted = adapt_command_for_windows(&plain_cmd);
+        #[cfg(windows)]
+        {
+            assert_eq!(adapted.len(), 4);
+            assert_eq!(adapted[0], "cmd.exe");
+            assert_eq!(adapted[1], "/c");
+            assert_eq!(adapted[2], "codex");
+            assert_eq!(adapted[3], "--help");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(adapted, plain_cmd);
+        }
     }
 }
