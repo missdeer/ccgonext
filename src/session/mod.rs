@@ -696,7 +696,13 @@ impl AgentSession {
         };
 
         // Send message to PTY
+        tracing::info!(
+            "[Session] Sending message to {} PTY: {} bytes",
+            self.name,
+            prepared.message_with_sentinel.len()
+        );
         if let Err(e) = pty.write_line(&prepared.message_with_sentinel).await {
+            tracing::error!("[Session] PTY write failed for {}: {}", self.name, e);
             drop(pty_guard);
             // PTY write failed, unlock session and clear current request
             self.log_provider.unlock_session().await;

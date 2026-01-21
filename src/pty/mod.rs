@@ -12,6 +12,41 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 
+/// Handle terminal query sequences by sending appropriate responses.
+/// This is needed because macOS native PTY doesn't automatically respond to
+/// terminal queries like Windows ConPTY does.
+fn handle_terminal_queries(data: &[u8], writer: &mut dyn std::io::Write) -> std::io::Result<()> {
+
+    // Search for terminal query sequences in the raw bytes
+    // We need to respond immediately to avoid timeouts
+
+    // Check for Cursor Position Report (CPR) query: ESC[6n
+    if data.windows(4).any(|w| w == b"\x1b[6n") {
+        // Respond with cursor at position 1,1: ESC[1;1R
+        writer.write_all(b"\x1b[1;1R")?;
+        writer.flush()?;
+        tracing::debug!("[PTY] Responded to CPR query with position 1;1");
+    }
+
+    // Check for Device Status Report (DSR) query: ESC[5n
+    if data.windows(4).any(|w| w == b"\x1b[5n") {
+        // Respond with "terminal is OK": ESC[0n
+        writer.write_all(b"\x1b[0n")?;
+        writer.flush()?;
+        tracing::debug!("[PTY] Responded to DSR query with OK status");
+    }
+
+    // Check for Primary Device Attributes (DA) query: ESC[c
+    if data.windows(3).any(|w| w == b"\x1b[c") {
+        // Respond as VT100: ESC[?1;0c
+        writer.write_all(b"\x1b[?1;0c")?;
+        writer.flush()?;
+        tracing::debug!("[PTY] Responded to DA query as VT100");
+    }
+
+    Ok(())
+}
+
 /// Adapt command for Windows execution.
 /// On Windows, Node.js CLI tools (codex, gemini, etc.) are installed as .cmd batch files.
 /// CreateProcessW cannot directly execute .cmd/.ps1 files, so we wrap them appropriately:
@@ -207,7 +242,11 @@ impl PtyHandle {
 
         // Get reader BEFORE moving master
         let mut reader = pair.master.try_clone_reader()?;
-        let mut writer = pair.master.take_writer()?;
+        let writer = pair.master.take_writer()?;
+
+        // Wrap writer in Arc<Mutex> so both reader and writer threads can access it
+        let writer = Arc::new(std::sync::Mutex::new(writer));
+        let writer_for_queries = writer.clone();
 
         let (output_tx, _) = broadcast::channel(1024);
         let buffer = Arc::new(Mutex::new(PtyBuffer::new(buffer_limit)));
@@ -224,14 +263,17 @@ impl PtyHandle {
         let shutdown_reader = shutdown.clone();
 
         // Spawn write handler thread
+        let writer_for_commands = writer.clone();
         std::thread::spawn(move || {
             while let Some(cmd) = write_rx.blocking_recv() {
                 match cmd {
                     PtyCommand::Write { data, response } => {
-                        let result = writer
-                            .write_all(&data)
-                            .and_then(|_| writer.flush())
-                            .map_err(|e| anyhow::anyhow!("{}", e));
+                        let result = {
+                            let mut w = writer_for_commands.lock().unwrap();
+                            w.write_all(&data)
+                                .and_then(|_| w.flush())
+                                .map_err(|e| anyhow::anyhow!("{}", e))
+                        };
                         let _ = response.send(result);
                     }
                     PtyCommand::Resize {
@@ -257,7 +299,7 @@ impl PtyHandle {
             }
         });
 
-        // Spawn output reader thread
+        // Spawn output reader thread with terminal query response handler
         let output_tx_clone = output_tx.clone();
         let buffer_clone = buffer.clone();
 
@@ -271,6 +313,13 @@ impl PtyHandle {
                     Ok(0) => break, // EOF
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+
+                        // Check for terminal query sequences and respond automatically
+                        // This must happen BEFORE broadcasting to avoid race conditions
+                        {
+                            let mut w = writer_for_queries.lock().unwrap();
+                            let _ = handle_terminal_queries(&data, &mut *w);
+                        }
 
                         // Broadcast to WebSocket subscribers
                         let _ = output_tx_clone.send(data.clone());
@@ -315,10 +364,12 @@ impl PtyHandle {
     ///
     /// This ensures proper handling by TUI applications running in raw mode.
     pub async fn write_line(&self, line: &str) -> Result<()> {
+        tracing::debug!("[PTY] write_line called with {} bytes, has_newlines={}", line.len(), line.contains('\n'));
         let has_newlines = line.contains('\n');
 
         if has_newlines {
             // Multi-line: use bracketed paste to prevent line-by-line execution
+            tracing::debug!("[PTY] Using bracketed paste mode");
             // Send paste start sequence
             self.write(b"\x1b[200~").await?;
 
@@ -332,6 +383,7 @@ impl PtyHandle {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         } else {
             // Single-line: send directly
+            tracing::debug!("[PTY] Sending single-line: {:?}", line);
             self.write(line.as_bytes()).await?;
 
             // Brief delay to let TUI process input
@@ -339,6 +391,7 @@ impl PtyHandle {
         }
 
         // Send Enter key (CR byte triggers input submission in most TUIs)
+        tracing::debug!("[PTY] Sending Enter key");
         self.write(b"\r").await
     }
 

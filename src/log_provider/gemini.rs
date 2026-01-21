@@ -165,15 +165,18 @@ impl LogProvider for GeminiLogProvider {
         );
 
         // Use locked session file if available, otherwise find latest
-        let chat_file = {
+        let (chat_file, should_check_newer) = {
             let locked = self.locked_session.lock().await;
             if let Some(ref path) = *locked {
                 tracing::debug!("[GeminiLogProvider] Using locked session file: {:?}", path);
-                path.clone()
+                (path.clone(), true) // Mark that we should check for newer files as fallback
             } else {
                 drop(locked);
                 match self.find_latest_chat_file() {
-                    Some(f) => f,
+                    Some(f) => {
+                        tracing::debug!("[GeminiLogProvider] Found latest chat file: {:?}", f);
+                        (f, false)
+                    }
                     None => {
                         tracing::debug!("[GeminiLogProvider] No chat file found");
                         return None;
@@ -247,11 +250,68 @@ impl LogProvider for GeminiLogProvider {
                 "[GeminiLogProvider] Found assistant reply, new offset={}",
                 total_messages
             );
-        } else {
-            tracing::debug!("[GeminiLogProvider] No new assistant reply found");
+            return result;
         }
 
-        result
+        // Fallback: If we were using a locked session file and found no new messages,
+        // check if there's a newer session file that might have the response
+        if should_check_newer {
+            tracing::debug!(
+                "[GeminiLogProvider] No reply in locked session, checking for newer files"
+            );
+
+            if let Some(latest_file) = self.find_latest_chat_file() {
+                // Check if this is a different file than the locked one
+                if latest_file != chat_file {
+                    tracing::info!(
+                        "[GeminiLogProvider] Found newer session file: {:?}, switching to it",
+                        latest_file
+                    );
+
+                    // Try to read from the newer file
+                    if let Ok(file) = File::open(&latest_file) {
+                        let mut reader = BufReader::new(file);
+                        let mut content = String::new();
+                        if reader.read_to_string(&mut content).is_ok() {
+                            let entries = self.parse_chat_json(&content);
+                            let total_messages = entries.len() as u64;
+
+                            tracing::debug!(
+                                "[GeminiLogProvider] Parsed {} messages from newer file",
+                                total_messages
+                            );
+
+                            // Look for assistant messages in the newer file
+                            // Start from offset 0 since this is a new file
+                            let result = entries
+                                .into_iter()
+                                .enumerate()
+                                .rfind(|(_, (role, _, _))| {
+                                    role == "assistant" || role == "model" || role == "gemini"
+                                })
+                                .map(|(idx, (_, content, timestamp))| LogEntry {
+                                    content,
+                                    offset: idx as u64 + 1,
+                                    timestamp,
+                                    inode: self.get_inode(),
+                                });
+
+                            if result.is_some() {
+                                self.current_offset.store(total_messages, Ordering::SeqCst);
+                                tracing::info!(
+                                    "[GeminiLogProvider] Found assistant reply in newer file, offset={}",
+                                    total_messages
+                                );
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("[GeminiLogProvider] No new assistant reply found");
+        None
     }
 
     async fn get_history(&self, _session_id: Option<&str>, count: usize) -> Vec<HistoryEntry> {
