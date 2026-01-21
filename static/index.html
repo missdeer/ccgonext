@@ -149,6 +149,21 @@
         .status-dot.stopped { background: #cccccc; }
         .status-dot.busy { background: #eab308; }
         .status-dot.error { background: #ef4444; }
+        .input-badge {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+            border: 1px solid;
+            margin-left: 0.5rem;
+        }
+        .input-badge.enabled {
+            color: #22c55e;
+            border-color: #22c55e;
+        }
+        .input-badge.disabled {
+            color: #888;
+            border-color: #888;
+        }
         .terminal-container {
             flex: 1;
             min-height: 250px;
@@ -190,6 +205,7 @@
                 <a href="/" class="nav-link" data-nav="overview">Overview</a>
                 <!-- Agent links will be dynamically generated -->
             </nav>
+            <span class="input-badge disabled" id="input-badge">READ-ONLY</span>
             <div class="status-badge" id="global-status">Connecting...</div>
         </div>
     </header>
@@ -226,37 +242,71 @@
         const path = window.location.pathname.replace(/^\//, '').toLowerCase();
         const singleAgent = path && agentById[path] ? path : null;
 
-        function initTerminal(agent, container) {
-            const term = new Terminal({
-                theme: {
-                    background: '#1a1a2e',
-                    foreground: '#eee',
-                    cursor: '#e94560'
-                },
-                fontSize: 14,
-                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                cursorBlink: true
-            });
-
-            const fitAddon = new FitAddon.FitAddon();
-            term.loadAddon(fitAddon);
-            term.open(container);
-
-            // Delay fit to ensure container has size
-            requestAnimationFrame(() => {
-                fitAddon.fit();
+         function initTerminal(agent, container) {
+             const term = new Terminal({
+                 theme: {
+                     background: '#1a1a2e',
+                     foreground: '#eee',
+                     cursor: '#e94560'
+                 },
+                 fontSize: 14,
+                 fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                 cursorBlink: inputEnabled,
+                 disableStdin: !inputEnabled,
+                 allowProposedApi: true
+             });
+ 
+             const fitAddon = new FitAddon.FitAddon();
+             term.loadAddon(fitAddon);
+             term.open(container);
+ 
+             // Make keyboard input work: ensure xterm gets focus when the user clicks the terminal.
+             container.addEventListener('mousedown', () => term.focus());
+             container.addEventListener('touchstart', () => term.focus(), { passive: true });
+             container.addEventListener('focus', () => term.focus());
+ 
+             // In fullscreen (single-agent) mode, focus immediately for "type to interact".
+             if (singleAgent) {
+                 requestAnimationFrame(() => term.focus());
+             }
+ 
+             // Delay fit to ensure container has size
+             requestAnimationFrame(() => {
+                 fitAddon.fit();
+                 sendResize(agent, term.cols, term.rows);
             });
 
             terminals[agent] = { term, fitAddon };
 
-            // Handle input
-            term.onData(data => {
-                if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
-                    websockets[agent].send(data);
+             // Handle keyboard input
+             term.onData(data => {
+                 if (!inputEnabled) return;
+                 if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
+                     websockets[agent].send(data);
+                 }
+             });
+ 
+             // Handle binary input (for mouse events, etc.)
+             term.onBinary(data => {
+                 if (!inputEnabled) return;
+                 if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
+                     const bytes = new Uint8Array(data.length);
+                     for (let i = 0; i < data.length; i++) {
+                         bytes[i] = data.charCodeAt(i);
+                    }
+                    websockets[agent].send(bytes);
                 }
             });
 
             return { term, fitAddon };
+        }
+
+        // Send resize command to backend
+        function sendResize(agent, cols, rows) {
+            if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
+                const cmd = '\x00' + JSON.stringify({ type: 'resize', cols, rows });
+                websockets[agent].send(cmd);
+            }
         }
 
         function connectWebSocket(agent) {
@@ -267,6 +317,11 @@
 
             ws.onopen = () => {
                 console.log(`WebSocket connected for ${agent}`);
+                // Send initial resize after connection
+                if (terminals[agent]) {
+                    const { term } = terminals[agent];
+                    sendResize(agent, term.cols, term.rows);
+                }
             };
 
             ws.onmessage = (event) => {
@@ -290,6 +345,8 @@
             websockets[agent] = ws;
         }
 
+        let inputEnabled = false;
+
         async function fetchStatus() {
             try {
                 const res = await fetch('/api/status');
@@ -301,6 +358,10 @@
                     // First fetch - initialize enabled agents
                     enabledAgents = serverAgents;
                 }
+
+                // Update input enabled status
+                inputEnabled = data.input_enabled || false;
+                updateInputBadge();
 
                 let onlineCount = 0;
                 data.agents.forEach(agent => {
@@ -318,6 +379,20 @@
                 return [];
             }
         }
+
+         function updateInputBadge() {
+             const badge = document.getElementById('input-badge');
+             if (badge) {
+                 badge.textContent = inputEnabled ? 'INPUT' : 'READ-ONLY';
+                 badge.className = 'input-badge ' + (inputEnabled ? 'enabled' : 'disabled');
+             }
+ 
+             // Keep terminal input state in sync with backend config.
+             Object.values(terminals).forEach(({ term }) => {
+                 term.options.disableStdin = !inputEnabled;
+                 term.options.cursorBlink = inputEnabled;
+             });
+         }
 
         function updateAgentStatus(agent, state) {
             const dot = document.getElementById(`${agent}-status-dot`);
@@ -346,28 +421,28 @@
             }
         }
 
-        function createAgentPanel(agent) {
-            const agentData = agentById[agent];
-            if (!agentData) return null;
-
-            const panel = document.createElement('div');
-            panel.className = 'agent-panel';
-            panel.dataset.agent = agent;
-            panel.innerHTML = `
-                <div class="agent-header">
-                    <div class="agent-name">
-                        <span class="agent-icon" aria-hidden="true">${agentData.icon}</span>
-                        <span>${agentData.label}</span>
-                    </div>
-                    <div class="agent-status">
-                        <span class="status-dot" id="${agent}-status-dot"></span>
-                        <span id="${agent}-status-text">STOPPED</span>
-                    </div>
-                </div>
-                <div class="terminal-container" id="${agent}-terminal"></div>
-            `;
-            return panel;
-        }
+         function createAgentPanel(agent) {
+             const agentData = agentById[agent];
+             if (!agentData) return null;
+ 
+             const panel = document.createElement('div');
+             panel.className = 'agent-panel';
+             panel.dataset.agent = agent;
+             panel.innerHTML = `
+                 <div class="agent-header">
+                     <div class="agent-name">
+                         <span class="agent-icon" aria-hidden="true">${agentData.icon}</span>
+                         <span>${agentData.label}</span>
+                     </div>
+                     <div class="agent-status">
+                         <span class="status-dot" id="${agent}-status-dot"></span>
+                         <span id="${agent}-status-text">STOPPED</span>
+                     </div>
+                 </div>
+                 <div class="terminal-container" id="${agent}-terminal" tabindex="0"></div>
+             `;
+             return panel;
+         }
 
         function setupFullscreenMode(agent) {
             document.getElementById('overview-container').classList.add('hidden');
@@ -453,8 +528,9 @@
 
             // Handle resize
             window.addEventListener('resize', () => {
-                Object.values(terminals).forEach(({ fitAddon }) => {
+                Object.entries(terminals).forEach(([agent, { term, fitAddon }]) => {
                     fitAddon.fit();
+                    sendResize(agent, term.cols, term.rows);
                 });
             });
 
