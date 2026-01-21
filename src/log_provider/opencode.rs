@@ -410,6 +410,55 @@ impl LogProvider for OpenCodeLogProvider {
             since_offset
         );
 
+        // If no new entries in locked session, check for newer session
+        if new_entries.is_empty() && locked_session_id.is_some() {
+            tracing::debug!(
+                "[OpenCodeLogProvider] No reply in locked session, checking for newer sessions"
+            );
+
+            // Get the latest session (might be different from locked one)
+            if let Some((path, session)) = self.get_latest_session() {
+                if let Some(new_session_id) = session.get("id").and_then(|i| i.as_str()) {
+                    // Check if it's a different session
+                    if Some(new_session_id) != locked_session_id.as_deref() {
+                        tracing::info!(
+                            "[OpenCodeLogProvider] Found newer session: {:?}, switching to it",
+                            path
+                        );
+
+                        // Get entries from the new session
+                        let new_session_entries = self.get_assistant_entries(Some(new_session_id));
+
+                        if !new_session_entries.is_empty() {
+                            // Update locked session to the new one
+                            *self.locked_session.lock().await = Some(new_session_id.to_string());
+
+                            tracing::debug!(
+                                "[OpenCodeLogProvider] Parsed {} messages from newer session",
+                                new_session_entries.len()
+                            );
+
+                            // Return the latest entry from the new session
+                            let total = new_session_entries.len() as u64;
+                            if let Some((_, content, timestamp)) = new_session_entries.last() {
+                                self.current_offset.store(total, Ordering::SeqCst);
+                                tracing::info!(
+                                    "[OpenCodeLogProvider] Found assistant reply in new session, offset={}",
+                                    total
+                                );
+                                return Some(LogEntry {
+                                    content: content.clone(),
+                                    offset: total,
+                                    timestamp: *timestamp,
+                                    inode: self.get_inode(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let result = new_entries
             .into_iter()
             .last()
