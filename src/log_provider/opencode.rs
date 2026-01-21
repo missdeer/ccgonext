@@ -1,9 +1,9 @@
 //! OpenCode log provider
 //!
 //! Observed storage layout:
-//!   storage/session/<projectID>/ses_*.json
-//!   storage/message/<sessionID>/msg_*.json
-//!   storage/part/<messageID>/prt_*.json
+//!   `storage/session/<projectID>/ses_*.json`
+//!   `storage/message/<sessionID>/msg_*.json`
+//!   `storage/part/<messageID>/prt_*.json`
 //!
 //! Instead of computing projectID (which requires git and is fragile),
 //! we monitor the entire storage directory and find the most recently
