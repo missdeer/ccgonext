@@ -16,7 +16,6 @@ const DEFAULT_ROWS: u16 = 40;
 /// This is needed because macOS native PTY doesn't automatically respond to
 /// terminal queries like Windows ConPTY does.
 fn handle_terminal_queries(data: &[u8], writer: &mut dyn std::io::Write) -> std::io::Result<()> {
-
     // Search for terminal query sequences in the raw bytes
     // We need to respond immediately to avoid timeouts
 
@@ -364,7 +363,11 @@ impl PtyHandle {
     ///
     /// This ensures proper handling by TUI applications running in raw mode.
     pub async fn write_line(&self, line: &str) -> Result<()> {
-        tracing::debug!("[PTY] write_line called with {} bytes, has_newlines={}", line.len(), line.contains('\n'));
+        tracing::debug!(
+            "[PTY] write_line called with {} bytes, has_newlines={}",
+            line.len(),
+            line.contains('\n')
+        );
         let has_newlines = line.contains('\n');
 
         if has_newlines {
