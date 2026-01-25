@@ -3,14 +3,16 @@
 //! Observed storage layout:
 //!   ~/.gemini/tmp/<project_hash>/chats/session-*.json
 //!
-//! Instead of computing project_hash (which is fragile due to path normalization
-//! differences across platforms), we monitor the entire log directory and find
-//! the most recently modified session file.
+//! We prefer using a deterministic project_hash derived from the agent working
+//! directory when available, to avoid locking the wrong project's session file
+//! when multiple projects exist under ~/.gemini/tmp.
 
 use super::{HistoryEntry, LockedSession, LogEntry, LogProvider, PathMapper};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -30,14 +32,15 @@ struct LockedGeminiSession {
 }
 
 pub struct GeminiLogProvider {
-    log_path: PathBuf,
+    log_root: PathBuf,
+    project_dir: Option<PathBuf>,
     current_offset: Arc<AtomicU64>,
     locked_session: Arc<Mutex<Option<LockedGeminiSession>>>,
 }
 
 impl GeminiLogProvider {
     pub fn new(config: Option<&HashMap<String, String>>) -> Self {
-        let log_path = if let Some(cfg) = config {
+        let log_root = if let Some(cfg) = config {
             if let Some(path) = cfg.get("path_pattern") {
                 PathMapper::normalize(path)
             } else {
@@ -47,13 +50,19 @@ impl GeminiLogProvider {
             Self::default_log_path()
         };
 
+        let project_dir = config
+            .and_then(|cfg| cfg.get("working_dir"))
+            .map(|wd| Self::project_dir_for_working_dir(&log_root, wd));
+
         tracing::info!(
-            "[GeminiLogProvider] Initialized with log_path={:?}",
-            log_path
+            "[GeminiLogProvider] Initialized with log_root={:?}, project_dir={:?}",
+            log_root,
+            project_dir
         );
 
         Self {
-            log_path,
+            log_root,
+            project_dir,
             current_offset: Arc::new(AtomicU64::new(0)),
             locked_session: Arc::new(Mutex::new(None)),
         }
@@ -72,21 +81,115 @@ impl GeminiLogProvider {
         PathMapper::normalize("~/.gemini/tmp")
     }
 
+    fn project_dir_for_working_dir(log_root: &Path, working_dir: &str) -> PathBuf {
+        // Gemini CLI uses sha256(process.cwd()) as the project hash directory name.
+        //
+        // Path normalization can vary (drive letter casing, separators, canonicalization),
+        // so try a small set of candidates and prefer an existing directory if found.
+        let normalized = PathMapper::normalize(working_dir);
+        let normalized_str = normalized.to_string_lossy().to_string();
+
+        let mut candidates: Vec<String> = Vec::new();
+        candidates.push(normalized_str.clone());
+
+        // Try alternate separator normalization (some callers may provide mixed separators).
+        let win_sep = normalized_str.replace('/', "\\");
+        if win_sep != normalized_str {
+            candidates.push(win_sep);
+        }
+        let unix_sep = normalized_str.replace('\\', "/");
+        if unix_sep != normalized_str {
+            candidates.push(unix_sep);
+        }
+
+        if let Ok(canon) = normalized.canonicalize() {
+            candidates.push(canon.to_string_lossy().to_string());
+        }
+
+        // Trim trailing separators (if any)
+        let trimmed = normalized_str.trim_end_matches(['/', '\\']).to_string();
+        if trimmed != normalized_str {
+            candidates.push(trimmed);
+        }
+
+        // Windows: try toggling drive letter case (C: vs c:)
+        if normalized_str.len() >= 2 && normalized_str.as_bytes()[1] == b':' {
+            let drive = normalized_str.chars().next().unwrap_or('C');
+            let toggled = if drive.is_ascii_uppercase() {
+                drive.to_ascii_lowercase()
+            } else {
+                drive.to_ascii_uppercase()
+            };
+            candidates.push(format!("{}{}", toggled, &normalized_str[1..]));
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut fallback_dir: Option<PathBuf> = None;
+
+        for candidate in candidates.into_iter() {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+
+            let digest = Sha256::digest(candidate.as_bytes());
+            let mut hash = String::with_capacity(64);
+            for b in digest {
+                let _ = write!(&mut hash, "{:02x}", b);
+            }
+
+            let dir = log_root.join(hash);
+            if fallback_dir.is_none() {
+                fallback_dir = Some(dir.clone());
+            }
+
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+
+        fallback_dir.unwrap_or_else(|| log_root.to_path_buf())
+    }
+
     fn find_latest_chat_file(&self) -> Option<PathBuf> {
         tracing::debug!(
             "[GeminiLogProvider] Scanning for latest chat file in {:?}",
-            self.log_path
+            self.log_root
         );
 
-        if !self.log_path.exists() {
+        if let Some(ref project_dir) = self.project_dir {
+            let chats_dir = project_dir.join("chats");
+            if !chats_dir.is_dir() {
+                tracing::debug!(
+                    "[GeminiLogProvider] Project chats dir not available: {:?}",
+                    chats_dir
+                );
+                return None;
+            }
+
+            let result = Self::scan_latest_session_file_in_chats_dir(&chats_dir);
+            if let Some(ref file) = result {
+                tracing::debug!(
+                    "[GeminiLogProvider] Found latest chat file in project dir: {:?}",
+                    file
+                );
+            } else {
+                tracing::debug!(
+                    "[GeminiLogProvider] No chat files found in project dir: {:?}",
+                    chats_dir
+                );
+            }
+            return result;
+        }
+
+        if !self.log_root.exists() {
             tracing::warn!(
                 "[GeminiLogProvider] Log path does not exist: {:?}",
-                self.log_path
+                self.log_root
             );
             return None;
         }
 
-        let result = Self::scan_latest_session(&self.log_path);
+        let result = Self::scan_latest_session(&self.log_root);
         if let Some(ref file) = result {
             tracing::debug!("[GeminiLogProvider] Found latest chat file: {:?}", file);
         } else {
@@ -556,7 +659,15 @@ impl LogProvider for GeminiLogProvider {
     }
 
     fn get_watch_path(&self) -> Option<PathBuf> {
-        Some(self.log_path.clone())
+        if let Some(ref project_dir) = self.project_dir {
+            let chats_dir = project_dir.join("chats");
+            return Some(if chats_dir.is_dir() {
+                chats_dir
+            } else {
+                project_dir.clone()
+            });
+        }
+        Some(self.log_root.clone())
     }
 
     async fn lock_session(&self) -> Option<LockedSession> {
@@ -603,5 +714,65 @@ impl LogProvider for GeminiLogProvider {
             tracing::debug!("[GeminiLogProvider] Session unlocked");
         }
         *locked = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_session_file(path: &Path, last_updated: &str) {
+        let content = format!(
+            r#"{{
+  "sessionId": "test",
+  "projectHash": "deadbeef",
+  "startTime": "2026-01-01T00:00:00.000Z",
+  "lastUpdated": "{last_updated}",
+  "messages": [
+    {{
+      "id": "1",
+      "timestamp": "2026-01-01T00:00:00.000Z",
+      "type": "gemini",
+      "content": "hello"
+    }}
+  ]
+}}"#
+        );
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn prefers_project_hash_dir_over_global_latest() {
+        let root = tempdir().unwrap();
+
+        // Simulate two projects under GEMINI_ROOT/tmp
+        let working_dir = r"D:\Shareware\ccgo";
+        let project_dir = GeminiLogProvider::project_dir_for_working_dir(root.path(), working_dir);
+        let other_dir = root
+            .path()
+            .join("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+        let project_chats = project_dir.join("chats");
+        let other_chats = other_dir.join("chats");
+        fs::create_dir_all(&project_chats).unwrap();
+        fs::create_dir_all(&other_chats).unwrap();
+
+        let project_session = project_chats.join("session-2026-01-01T00-00-00test.json");
+        let other_session = other_chats.join("session-2026-01-02T00-00-00test.json");
+        write_session_file(&project_session, "2026-01-01T00:00:00.000Z");
+        write_session_file(&other_session, "2026-01-02T00:00:00.000Z");
+
+        let mut cfg = HashMap::new();
+        cfg.insert(
+            "path_pattern".to_string(),
+            root.path().to_string_lossy().to_string(),
+        );
+        cfg.insert("working_dir".to_string(), working_dir.to_string());
+
+        let provider = GeminiLogProvider::new(Some(&cfg));
+        let chosen = provider.find_latest_chat_file().unwrap();
+
+        assert_eq!(chosen, project_session);
     }
 }

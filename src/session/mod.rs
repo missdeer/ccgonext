@@ -811,6 +811,9 @@ impl AgentSession {
                     name,
                     entry.content.len()
                 );
+                let entry =
+                    Self::wait_for_stable_reply(&log_provider, baseline_offset, entry, deadline)
+                        .await;
                 Self::deliver_reply(&session, entry).await;
                 return;
             }
@@ -858,6 +861,13 @@ impl AgentSession {
                                         entry.content.len()
                                     );
                                     drop(sub.handle); // Cancel watcher
+                                    let entry = Self::wait_for_stable_reply(
+                                        &log_provider,
+                                        baseline_offset,
+                                        entry,
+                                        deadline,
+                                    )
+                                    .await;
                                     Self::deliver_reply(&session, entry).await;
                                     return;
                                 }
@@ -882,6 +892,13 @@ impl AgentSession {
                                         entry.content.len()
                                     );
                                     drop(sub.handle);
+                                    let entry = Self::wait_for_stable_reply(
+                                        &log_provider,
+                                        baseline_offset,
+                                        entry,
+                                        deadline,
+                                    )
+                                    .await;
                                     Self::deliver_reply(&session, entry).await;
                                     return;
                                 }
@@ -902,6 +919,13 @@ impl AgentSession {
                                         entry.content.len()
                                     );
                                     drop(sub.handle);
+                                    let entry = Self::wait_for_stable_reply(
+                                        &log_provider,
+                                        baseline_offset,
+                                        entry,
+                                        deadline,
+                                    )
+                                    .await;
                                     Self::deliver_reply(&session, entry).await;
                                     return;
                                 }
@@ -938,6 +962,13 @@ impl AgentSession {
                         name,
                         entry.content.len()
                     );
+                    let entry = Self::wait_for_stable_reply(
+                        &log_provider,
+                        baseline_offset,
+                        entry,
+                        deadline,
+                    )
+                    .await;
                     Self::deliver_reply(&session, entry).await;
                     return;
                 }
@@ -951,6 +982,94 @@ impl AgentSession {
             );
             Self::handle_reply_timeout(&session, &name).await;
         });
+    }
+
+    async fn wait_for_stable_reply(
+        log_provider: &Arc<dyn LogProvider>,
+        baseline_offset: u64,
+        mut entry: crate::log_provider::LogEntry,
+        deadline: Instant,
+    ) -> crate::log_provider::LogEntry {
+        // Some CLIs (notably Gemini) update a single log entry incrementally while streaming.
+        // Returning immediately can capture only the first chunk.
+        //
+        // Reference: claude_code_bridge uses content hash (SHA256) to detect when reply stops changing.
+        // We use a simpler but effective approach: compare content length and content equality.
+        //
+        // Strategy:
+        // 1. Poll for new content every POLL_MS
+        // 2. If content changed, reset the quiet timer
+        // 3. If content unchanged for QUIET_MS, consider reply complete
+        // 4. Use multiple confirmation rounds to avoid false positives from streaming pauses
+        const POLL_MS: u64 = 200;
+        const QUIET_MS: u64 = 600; // Increased from 400ms for more reliability
+        const MIN_STABLE_CHECKS: u32 = 2; // Require multiple unchanged checks
+
+        let poll = Duration::from_millis(POLL_MS);
+        let quiet = Duration::from_millis(QUIET_MS);
+        let mut last_change = Instant::now();
+        let mut stable_check_count: u32 = 0;
+        let mut last_content_len = entry.content.len();
+
+        tracing::debug!(
+            "[StableReply] Starting stability check, initial content len: {}",
+            last_content_len
+        );
+
+        while Instant::now() < deadline {
+            let time_since_change = Instant::now().duration_since(last_change);
+
+            // Check if we've had enough stable checks after quiet period
+            if time_since_change >= quiet && stable_check_count >= MIN_STABLE_CHECKS {
+                tracing::debug!(
+                    "[StableReply] Reply stable after {}ms quiet, {} checks, final len: {}",
+                    time_since_change.as_millis(),
+                    stable_check_count,
+                    entry.content.len()
+                );
+                break;
+            }
+
+            tokio::time::sleep(poll).await;
+
+            let Some(next) = log_provider.get_latest_reply(baseline_offset).await else {
+                // No reply found, increment stable count if we had content before
+                if last_content_len > 0 {
+                    stable_check_count += 1;
+                }
+                continue;
+            };
+
+            // Compare content: length first (fast), then full content if lengths match
+            let content_changed = next.content.len() != last_content_len
+                || next.offset != entry.offset
+                || next.content != entry.content;
+
+            if content_changed {
+                tracing::debug!(
+                    "[StableReply] Content changed: {} -> {} bytes",
+                    last_content_len,
+                    next.content.len()
+                );
+                entry = next;
+                last_content_len = entry.content.len();
+                last_change = Instant::now();
+                stable_check_count = 0; // Reset stable counter on any change
+            } else {
+                stable_check_count += 1;
+                tracing::debug!(
+                    "[StableReply] Content unchanged, stable check #{}, len: {}",
+                    stable_check_count,
+                    last_content_len
+                );
+            }
+        }
+
+        tracing::debug!(
+            "[StableReply] Returning reply with {} bytes",
+            entry.content.len()
+        );
+        entry
     }
 
     /// ClaudeCode-specific reply detection using PTY parsing

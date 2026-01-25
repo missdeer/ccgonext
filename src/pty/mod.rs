@@ -383,43 +383,69 @@ impl PtyHandle {
     /// Uses a two-step approach similar to terminal multiplexers (tmux/WezTerm):
     /// 1. Send the text content
     /// 2. Brief delay to let TUI process the input
-    /// 3. Send Enter key (CR byte)
+    /// 3. Send Enter key
     ///
     /// This ensures proper handling by TUI applications running in raw mode.
     pub async fn write_line(&self, line: &str) -> Result<()> {
-        tracing::debug!(
-            "[PTY] write_line called with {} bytes, has_newlines={}",
-            line.len(),
-            line.contains('\n')
-        );
-        let has_newlines = line.contains('\n');
+        tracing::debug!("[PTY] write_line called with {} bytes", line.len());
 
-        if has_newlines {
-            // Multi-line: use bracketed paste to prevent line-by-line execution
-            tracing::debug!("[PTY] Using bracketed paste mode");
-            // Send paste start sequence
-            self.write(b"\x1b[200~").await?;
+        // Send content character-by-character to ensure TUI can process each keystroke.
+        // This is slower but most compatible with various TUI implementations.
+        // Trim trailing newlines to avoid double line breaks when we send Enter.
+        let line = line.trim_end_matches(['\r', '\n']);
+        let bytes = line.as_bytes();
+        tracing::debug!("[PTY] Sending {} bytes character-by-character", bytes.len());
 
-            // Send content
-            self.write(line.as_bytes()).await?;
+        for (i, &byte) in bytes.iter().enumerate() {
+            // Skip \n and \r in content to avoid extra blank lines in TUI display.
+            // The final Enter key will submit the message.
+            if byte == b'\n' || byte == b'\r' {
+                continue;
+            }
+            self.write(&[byte]).await?;
 
-            // Send paste end sequence
-            self.write(b"\x1b[201~").await?;
-
-            // Brief delay to let TUI process bracketed paste content
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        } else {
-            // Single-line: send directly
-            tracing::debug!("[PTY] Sending single-line: {:?}", line);
-            self.write(line.as_bytes()).await?;
-
-            // Brief delay to let TUI process input
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Small delay every N characters to let TUI process input buffer.
+            // Delay every 64 chars to balance speed vs reliability.
+            if (i + 1) % 64 == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         }
 
-        // Send Enter key (CR byte triggers input submission in most TUIs)
-        tracing::debug!("[PTY] Sending Enter key");
-        self.write(b"\r").await
+        // Final delay before Enter to ensure TUI has processed all input
+        #[cfg(windows)]
+        let final_delay_ms = 500u64;
+        #[cfg(not(windows))]
+        let final_delay_ms = 200u64;
+        tracing::debug!(
+            "[PTY] Waiting {}ms before sending Enter (content size: {} bytes)",
+            final_delay_ms,
+            bytes.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(final_delay_ms)).await;
+
+        self.send_enter().await
+    }
+
+    /// Send Enter key to submit input.
+    ///
+    /// Platform-specific behavior:
+    /// - Windows: \r + delay + \n + delay + backspace (for TUI compatibility)
+    /// - Unix: \r only
+    async fn send_enter(&self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            tracing::debug!("[PTY] Sending Enter key (CR, delay, LF, delay, backspace)");
+            self.write(b"\r").await?;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.write(b"\n").await?;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.write(b"\x08").await
+        }
+        #[cfg(not(windows))]
+        {
+            tracing::debug!("[PTY] Sending Enter key (CR)");
+            self.write(b"\r").await
+        }
     }
 
     pub fn subscribe_output(&self) -> broadcast::Receiver<Vec<u8>> {
