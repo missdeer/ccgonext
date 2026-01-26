@@ -140,6 +140,23 @@
             font-size: 0.8rem;
             letter-spacing: 0.03em;
         }
+        .restart-btn {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border: 1px solid #000;
+            background: #fff;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .restart-btn:hover {
+            background: #000;
+            color: #fff;
+        }
+        .restart-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .status-dot {
             width: 8px;
             height: 8px;
@@ -447,6 +464,34 @@
             }
         }
 
+        async function restartAgent(agent) {
+            const agentData = agentById[agent];
+            const label = agentData ? agentData.label : agent;
+            if (!confirm(`Restart ${label}?`)) {
+                return;
+            }
+            const btn = document.getElementById(`${agent}-restart-btn`);
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '...';
+            }
+            try {
+                const res = await fetch(`/api/restart/${agent}`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) {
+                    console.error(`Failed to restart ${agent}: ${data.message}`);
+                }
+            } catch (err) {
+                console.error(`Failed to restart ${agent}:`, err);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Restart';
+                }
+                fetchStatus();
+            }
+        }
+
          function createAgentPanel(agent, isFullscreen = false) {
              const agentData = agentById[agent];
              if (!agentData) return null;
@@ -469,6 +514,7 @@
                          <span>${agentData.label}</span>
                      </div>
                      <div class="agent-status">
+                         <button class="restart-btn" id="${agent}-restart-btn" onclick="restartAgent('${agent}')">Restart</button>
                          <span class="status-dot" id="${agent}-status-dot"></span>
                          <span id="${agent}-status-text">STOPPED</span>
                      </div>
