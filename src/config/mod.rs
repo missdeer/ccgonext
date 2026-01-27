@@ -37,8 +37,8 @@ impl Default for Config {
                 ready_pattern: r"(Gemini|>\s*$)".to_string(),
                 error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
                 supports_cwd: false,
-                sentinel_template: "\u{200B}MSG_ID:{id}\u{200B}\n{message}".to_string(),
-                sentinel_regex: r"\u{200B}MSG_ID:([a-f0-9-]+)\u{200B}".to_string(),
+                sentinel_template: "[MSG_ID:{id}]\n{message}".to_string(),
+                sentinel_regex: r"\[MSG_ID:([a-f0-9-]+)\]".to_string(),
             },
         );
 

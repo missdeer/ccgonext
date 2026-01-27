@@ -415,9 +415,10 @@ impl PtyHandle {
         tracing::debug!("[PTY] Sending {} bytes character-by-character", bytes.len());
 
         for (i, &byte) in bytes.iter().enumerate() {
-            // Skip \n and \r in content to avoid extra blank lines in TUI display.
+            // Skip \r (CR) in content to avoid double carriage returns.
+            // We preserve \n (LF) to allow multi-line messages and proper sentinel formatting.
             // The final Enter key will submit the message.
-            if byte == b'\n' || byte == b'\r' {
+            if byte == b'\r' {
                 continue;
             }
             self.write(&[byte]).await?;
