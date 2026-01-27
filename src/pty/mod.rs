@@ -198,6 +198,7 @@ pub struct PtyHandle {
     buffer: Arc<Mutex<PtyBuffer>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
+    #[allow(dead_code)] // Used only on Windows in send_enter()
     windows_enter_delay: std::time::Duration,
 }
 
