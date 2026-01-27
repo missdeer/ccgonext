@@ -182,36 +182,43 @@
             color: #888;
             border-color: #888;
         }
-        .terminal-container {
+        .terminal-wrapper {
             flex: 1;
-            min-height: 250px;
-            padding: 0.25rem;
-            background: #1a1a2e;
-        }
-
-        /* Agent image for overview mode */
-        .agent-image {
-            aspect-ratio: 4 / 3;
-            background: #1a1a2e;
-            cursor: pointer;
-            transition: opacity 0.2s;
-            overflow: hidden;
             position: relative;
+            min-height: 250px;
         }
-        .agent-image:hover {
-            opacity: 0.85;
-        }
-        .agent-image img {
+        .terminal-container {
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            padding: 0.25rem;
+            background: #1a1a2e;
+            box-sizing: border-box;
         }
-        .agent-image .click-hint {
+        .terminal-overlay {
             position: absolute;
             bottom: 0.5rem;
             right: 0.5rem;
-            font-size: 0.7rem;
-            color: #888;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.4rem 0.6rem;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 4px;
+            transition: background 0.2s, transform 0.2s;
+            z-index: 10;
+        }
+        .terminal-overlay:hover {
+            background: rgba(233, 69, 96, 0.9);
+            transform: scale(1.05);
+        }
+        .terminal-overlay .click-hint {
+            font-size: 0.75rem;
+            color: #ccc;
+            white-space: nowrap;
+        }
+        .terminal-overlay:hover .click-hint {
+            color: #fff;
         }
 
         /* Fullscreen mode (single agent) */
@@ -226,9 +233,16 @@
             display: flex;
             flex-direction: column;
         }
-        .container-full .terminal-container {
+        .container-full .terminal-wrapper {
             flex: 1;
             min-height: 0;
+        }
+        .container-full .terminal-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
         }
 
         .hidden { display: none !important; }
@@ -266,10 +280,10 @@
     <script>
         // Centralized agent configuration - single source of truth
         const AGENTS = [
-            { id: 'codex',      label: 'Codex',      icon: '🤖', image: 'codexcli.jpg' },
-            { id: 'gemini',     label: 'Gemini',     icon: '💎', image: 'geminicli.jpg' },
-            { id: 'opencode',   label: 'OpenCode',   icon: '🔷', image: 'opencode.jpg' },
-            { id: 'claudecode', label: 'ClaudeCode', icon: '🎯', image: 'claudecode.jpg' }
+            { id: 'codex',      label: 'Codex',      icon: '🤖' },
+            { id: 'gemini',     label: 'Gemini',     icon: '💎' },
+            { id: 'opencode',   label: 'OpenCode',   icon: '🔷' },
+            { id: 'claudecode', label: 'ClaudeCode', icon: '🎯' }
         ];
 
         // Create a lookup map for efficient access
@@ -285,7 +299,8 @@
         const path = window.location.pathname.replace(/^\//, '').toLowerCase();
         const singleAgent = path && agentById[path] ? path : null;
 
-         function initTerminal(agent, container) {
+         function initTerminal(agent, container, forceReadOnly = false) {
+             const canInput = inputEnabled && !forceReadOnly;
              const term = new Terminal({
                  theme: {
                      background: '#1a1a2e',
@@ -294,44 +309,44 @@
                  },
                  fontSize: 14,
                  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                 cursorBlink: inputEnabled,
-                 disableStdin: !inputEnabled,
+                 cursorBlink: canInput,
+                 disableStdin: !canInput,
                  allowProposedApi: true
              });
- 
+
              const fitAddon = new FitAddon.FitAddon();
              term.loadAddon(fitAddon);
              term.open(container);
- 
+
              // Make keyboard input work: ensure xterm gets focus when the user clicks the terminal.
              container.addEventListener('mousedown', () => term.focus());
              container.addEventListener('touchstart', () => term.focus(), { passive: true });
              container.addEventListener('focus', () => term.focus());
- 
+
              // In fullscreen (single-agent) mode, focus immediately for "type to interact".
              if (singleAgent) {
                  requestAnimationFrame(() => term.focus());
              }
- 
+
              // Delay fit to ensure container has size
              requestAnimationFrame(() => {
                  fitAddon.fit();
                  sendResize(agent, term.cols, term.rows);
             });
 
-            terminals[agent] = { term, fitAddon };
+            terminals[agent] = { term, fitAddon, forceReadOnly };
 
              // Handle keyboard input
              term.onData(data => {
-                 if (!inputEnabled) return;
+                 if (!inputEnabled || forceReadOnly) return;
                  if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
                      websockets[agent].send(data);
                  }
              });
- 
+
              // Handle binary input (for mouse events, etc.)
              term.onBinary(data => {
-                 if (!inputEnabled) return;
+                 if (!inputEnabled || forceReadOnly) return;
                  if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
                      const bytes = new Uint8Array(data.length);
                      for (let i = 0; i < data.length; i++) {
@@ -426,14 +441,17 @@
          function updateInputBadge() {
              const badge = document.getElementById('input-badge');
              if (badge) {
-                 badge.textContent = inputEnabled ? 'INPUT' : 'READ-ONLY';
-                 badge.className = 'input-badge ' + (inputEnabled ? 'enabled' : 'disabled');
+                 // In overview mode, always show READ-ONLY
+                 const displayEnabled = singleAgent ? inputEnabled : false;
+                 badge.textContent = displayEnabled ? 'INPUT' : 'READ-ONLY';
+                 badge.className = 'input-badge ' + (displayEnabled ? 'enabled' : 'disabled');
              }
- 
+
              // Keep terminal input state in sync with backend config.
-             Object.values(terminals).forEach(({ term }) => {
-                 term.options.disableStdin = !inputEnabled;
-                 term.options.cursorBlink = inputEnabled;
+             Object.values(terminals).forEach(({ term, forceReadOnly }) => {
+                 const canInput = inputEnabled && !forceReadOnly;
+                 term.options.disableStdin = !canInput;
+                 term.options.cursorBlink = canInput;
              });
          }
 
@@ -492,7 +510,7 @@
             }
         }
 
-         function createAgentPanel(agent, isFullscreen = false) {
+         function createAgentPanel(agent, isOverview = false) {
              const agentData = agentById[agent];
              if (!agentData) return null;
 
@@ -500,12 +518,11 @@
              panel.className = 'agent-panel';
              panel.dataset.agent = agent;
 
-             const terminalContent = isFullscreen
-                 ? `<div class="terminal-container" id="${agent}-terminal" tabindex="0"></div>`
-                 : `<div class="agent-image" onclick="window.location.href='/${agent}'">
-                     <img src="/${agentData.image}" alt="${agentData.label}">
-                     <div class="click-hint">Click to open</div>
-                   </div>`;
+             const clickOverlay = isOverview
+                 ? `<div class="terminal-overlay" onclick="window.location.href='/${agent}'">
+                       <span class="click-hint">⛶ Fullscreen</span>
+                    </div>`
+                 : '';
 
              panel.innerHTML = `
                  <div class="agent-header">
@@ -519,7 +536,10 @@
                          <span id="${agent}-status-text">STOPPED</span>
                      </div>
                  </div>
-                 ${terminalContent}
+                 <div class="terminal-wrapper">
+                     <div class="terminal-container" id="${agent}-terminal" tabindex="0"></div>
+                     ${clickOverlay}
+                 </div>
              `;
              return panel;
          }
@@ -529,7 +549,7 @@
             const fullContainer = document.getElementById('fullscreen-container');
             fullContainer.classList.remove('hidden');
 
-            const panel = createAgentPanel(agent, true);
+            const panel = createAgentPanel(agent);
             if (panel) {
                 fullContainer.innerHTML = '';
                 fullContainer.appendChild(panel);
@@ -583,7 +603,7 @@
                     const agentData = agentById[agentId];
                     if (!agentData) return;
 
-                    const panel = createAgentPanel(agentData.id);
+                    const panel = createAgentPanel(agentData.id, true);
                     if (panel) {
                         overviewContainer.appendChild(panel);
                     }
@@ -594,15 +614,24 @@
 
             if (singleAgent) {
                 setupFullscreenMode(singleAgent);
-                // Only initialize terminal and WebSocket in fullscreen mode
+                // Initialize terminal and WebSocket in fullscreen mode (respects inputEnabled)
                 const container = document.getElementById(`${singleAgent}-terminal`);
                 if (container) {
-                    initTerminal(singleAgent, container);
+                    initTerminal(singleAgent, container, false);
                     connectWebSocket(singleAgent);
                 }
+            } else {
+                // Overview mode: initialize terminals for all agents (always read-only)
+                enabledAgents.forEach(agentId => {
+                    const container = document.getElementById(`${agentId}-terminal`);
+                    if (container) {
+                        initTerminal(agentId, container, true);
+                        connectWebSocket(agentId);
+                    }
+                });
             }
 
-            // Handle resize (only needed in fullscreen mode)
+            // Handle resize
             window.addEventListener('resize', () => {
                 Object.entries(terminals).forEach(([agent, { term, fitAddon }]) => {
                     fitAddon.fit();
