@@ -71,6 +71,19 @@
             color: #000000;
             letter-spacing: 0.03em;
         }
+        .project-root {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.8rem;
+            color: #666;
+            padding: 0.3rem 0.6rem;
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: none;
+        }
 
         /* Grid mode (overview) */
         .container-grid {
@@ -257,6 +270,7 @@
 <body>
     <header class="header">
         <h1>CCGONEXT - AI Bridge Console</h1>
+        <div class="project-root" id="project-root-display" title="Project Root Path"></div>
         <div class="header-right">
             <nav class="nav-links">
                 <a href="/" class="nav-link" data-nav="overview">Overview</a>
@@ -420,6 +434,18 @@
                 // Update input enabled status
                 inputEnabled = data.input_enabled || false;
                 updateInputBadge();
+
+                // Update project root display
+                const projectRootEl = document.getElementById('project-root-display');
+                if (projectRootEl) {
+                    if (data.project_root) {
+                        projectRootEl.textContent = '📁 ' + data.project_root;
+                        projectRootEl.title = data.project_root;
+                        projectRootEl.style.display = 'inline-block';
+                    } else {
+                        projectRootEl.style.display = 'none';
+                    }
+                }
 
                 let onlineCount = 0;
                 data.agents.forEach(agent => {

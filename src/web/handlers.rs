@@ -18,6 +18,7 @@ pub struct AgentStatus {
 pub struct StatusResponse {
     pub agents: Vec<AgentStatus>,
     pub input_enabled: bool,
+    pub project_root: String,
 }
 
 pub async fn api_get_status(
@@ -36,6 +37,7 @@ pub async fn api_get_status(
     Ok(Json(StatusResponse {
         agents,
         input_enabled: state.config.web.input_enabled,
+        project_root: state.config.web.project_root.clone(),
     }))
 }
 

@@ -7,7 +7,7 @@ use ccgonext::{
     mcp::McpServer,
     pty::PtyManager,
     session::{AgentSession, SessionManager},
-    web::WebServer,
+    web::{WebServer, WebServerRunOptions},
 };
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
@@ -30,6 +30,22 @@ struct Cli {
     /// Web server host [env: CCGONEXT_HOST]
     #[arg(long, default_value = "127.0.0.1", env = "CCGONEXT_HOST")]
     host: String,
+
+    /// Retry binding to successive ports if the port is in use [env: CCGONEXT_PORT_RETRY]
+    #[arg(long, default_value = "0", env = "CCGONEXT_PORT_RETRY")]
+    port_retry: u16,
+
+    /// Auto-open the web UI in a browser (web mode only) [env: CCGONEXT_OPEN_BROWSER]
+    #[arg(long, env = "CCGONEXT_OPEN_BROWSER")]
+    open_browser: bool,
+
+    /// Expose local project root path in the web UI/status API [env: CCGONEXT_SHOW_PROJECT_ROOT]
+    #[arg(long, env = "CCGONEXT_SHOW_PROJECT_ROOT")]
+    show_project_root: bool,
+
+    /// Windows: delay between CR/LF in Enter key sequence [env: CCGONEXT_WINDOWS_ENTER_DELAY_MS]
+    #[arg(long, default_value = "200", env = "CCGONEXT_WINDOWS_ENTER_DELAY_MS")]
+    windows_enter_delay_ms: u64,
 
     /// Enable web terminal input [env: CCGONEXT_INPUT_ENABLED]
     #[arg(long, env = "CCGONEXT_INPUT_ENABLED")]
@@ -105,10 +121,16 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Serve) | None => {
-            run_mcp_server(config).await?;
+            run_mcp_server(config, cli.port_retry, cli.windows_enter_delay_ms).await?;
         }
         Some(Commands::Web) => {
-            run_web_server(config).await?;
+            run_web_server(
+                config,
+                cli.port_retry,
+                cli.open_browser,
+                cli.windows_enter_delay_ms,
+            )
+            .await?;
         }
         Some(Commands::Config) => {
             show_config(&config);
@@ -171,6 +193,14 @@ fn init_tracing(cli: &Cli) {
 
 fn build_config(cli: &Cli) -> Config {
     let enabled_agents: Vec<&str> = cli.agents.split(',').map(|s| s.trim()).collect();
+    let project_root = if cli.show_project_root {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        String::new()
+    };
 
     let mut agents = HashMap::new();
 
@@ -258,12 +288,17 @@ fn build_config(cli: &Cli) -> Config {
             auth_token: cli.auth_token.clone(),
             input_enabled: cli.input_enabled,
             output_buffer_size: cli.buffer_size,
+            project_root,
         },
     }
 }
 
-async fn run_mcp_server(config: Arc<Config>) -> anyhow::Result<()> {
-    let session_manager = create_session_manager(&config).await?;
+async fn run_mcp_server(
+    config: Arc<Config>,
+    port_retry: u16,
+    windows_enter_delay_ms: u64,
+) -> anyhow::Result<()> {
+    let session_manager = create_session_manager(&config, windows_enter_delay_ms).await?;
 
     // Set up shutdown signal handler
     let shutdown_manager = session_manager.clone();
@@ -279,7 +314,11 @@ async fn run_mcp_server(config: Arc<Config>) -> anyhow::Result<()> {
     let web_session_manager = session_manager.clone();
     tokio::spawn(async move {
         let web_server = WebServer::new(web_session_manager, web_config);
-        if let Err(e) = web_server.run().await {
+        let options = WebServerRunOptions {
+            port_retry,
+            open_browser: false,
+        };
+        if let Err(e) = web_server.run_with_options(options).await {
             tracing::error!("Web server error: {}", e);
         }
     });
@@ -295,8 +334,13 @@ async fn run_mcp_server(config: Arc<Config>) -> anyhow::Result<()> {
     result
 }
 
-async fn run_web_server(config: Arc<Config>) -> anyhow::Result<()> {
-    let session_manager = create_session_manager(&config).await?;
+async fn run_web_server(
+    config: Arc<Config>,
+    port_retry: u16,
+    open_browser: bool,
+    windows_enter_delay_ms: u64,
+) -> anyhow::Result<()> {
+    let session_manager = create_session_manager(&config, windows_enter_delay_ms).await?;
 
     // Set up shutdown signal handler
     let shutdown_manager = session_manager.clone();
@@ -309,7 +353,11 @@ async fn run_web_server(config: Arc<Config>) -> anyhow::Result<()> {
     });
 
     let web_server = WebServer::new(session_manager, config);
-    web_server.run().await?;
+    let options = WebServerRunOptions {
+        port_retry,
+        open_browser,
+    };
+    web_server.run_with_options(options).await?;
     Ok(())
 }
 
@@ -336,8 +384,14 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-async fn create_session_manager(config: &Config) -> anyhow::Result<Arc<SessionManager>> {
-    let pty_manager = Arc::new(PtyManager::new(config.web.output_buffer_size));
+async fn create_session_manager(
+    config: &Config,
+    windows_enter_delay_ms: u64,
+) -> anyhow::Result<Arc<SessionManager>> {
+    let pty_manager = Arc::new(PtyManager::new_with_windows_enter_delay_ms(
+        config.web.output_buffer_size,
+        windows_enter_delay_ms,
+    ));
     let session_manager = Arc::new(SessionManager::new(pty_manager));
 
     let working_dir = std::env::current_dir()?;

@@ -52,7 +52,8 @@ cargo build --release
 # 仅启动 Web 服务器
 ccgonext web
 
-# 浏览器打开 http://localhost:8765
+# 或自动在浏览器中打开 UI
+ccgonext web --open-browser
 ```
 
 ## 使用方法
@@ -68,6 +69,10 @@ ccgonext [选项] [命令]
 选项:
   -p, --port <端口>           Web 服务器端口 [环境变量: CCGONEXT_PORT] [默认: 8765]
       --host <地址>           Web 服务器地址 [环境变量: CCGONEXT_HOST] [默认: 127.0.0.1]
+      --port-retry <次数>     端口被占用时，递增端口重试绑定 [环境变量: CCGONEXT_PORT_RETRY] [默认: 0]
+      --open-browser          自动在浏览器中打开 Web UI（仅 web 模式）[环境变量: CCGONEXT_OPEN_BROWSER]
+      --show-project-root     在 Web UI/status API 中显示本地项目根目录路径 [环境变量: CCGONEXT_SHOW_PROJECT_ROOT]
+      --windows-enter-delay-ms <毫秒>  Windows: Enter 键序列 CR/LF 之间的延迟 [环境变量: CCGONEXT_WINDOWS_ENTER_DELAY_MS] [默认: 200]
       --input-enabled         启用 Web 终端输入 [环境变量: CCGONEXT_INPUT_ENABLED]
       --auth-token <TOKEN>    Web API 认证令牌 [环境变量: CCGONEXT_AUTH_TOKEN]
       --buffer-size <大小>    输出缓冲区大小（字节）[环境变量: CCGONEXT_BUFFER_SIZE] [默认: 10485760]
@@ -77,6 +82,10 @@ ccgonext [选项] [命令]
       --opencode-cmd <命令>   OpenCode 启动命令 [环境变量: CCGONEXT_OPENCODE_CMD] [默认: opencode]
       --claudecode-cmd <命令> ClaudeCode 启动命令 [环境变量: CCGONEXT_CLAUDECODE_CMD] [默认: claude]
       --agents <列表>         启用的 Agent（逗号分隔: codex,gemini,opencode,claudecode）[环境变量: CCGONEXT_AGENTS] [默认: codex,gemini,opencode]
+      --max-start-retries <次数>  Agent 启动失败时的最大重试次数 [环境变量: CCGONEXT_MAX_START_RETRIES] [默认: 3]
+      --start-retry-delay <毫秒>  启动重试的基础延迟（指数退避）[环境变量: CCGONEXT_START_RETRY_DELAY] [默认: 1000]
+      --log-file <路径>       日志文件路径（可选，未设置则仅输出到 stderr）[环境变量: CCGONEXT_LOG_FILE]
+      --log-dir <路径>        轮转日志目录 [环境变量: CCGONEXT_LOG_DIR]
   -h, --help                  显示帮助
   -V, --version               显示版本
 ```
@@ -141,10 +150,14 @@ CCGONEXT 提供一个 MCP 工具：
 ```bash
 export CCGONEXT_PORT=9000
 export CCGONEXT_HOST=0.0.0.0
+export CCGONEXT_PORT_RETRY=20
 export CCGONEXT_INPUT_ENABLED=true
 export CCGONEXT_AUTH_TOKEN=your-secret-token
+export CCGONEXT_OPEN_BROWSER=true
+export CCGONEXT_SHOW_PROJECT_ROOT=true
+export CCGONEXT_WINDOWS_ENTER_DELAY_MS=200
 export CCGONEXT_AGENTS=codex,gemini
-ccgonext
+ccgonext web
 ```
 
 ## WSL2 网络访问
@@ -152,14 +165,13 @@ ccgonext
 在 WSL2 中运行时，从 Windows 访问 Web UI：
 
 ```bash
-# 绑定到所有接口
-ccgonext --host 0.0.0.0
-
-# 从 Windows 通过 WSL2 IP 访问
-# 获取 WSL2 IP: ip addr show eth0 | grep "inet "
+# 在 WSL 中绑定到所有接口（便于 Windows 访问）
+ccgonext web --host 0.0.0.0
 ```
 
-或在 PowerShell（管理员）中设置端口转发：
+Web UI 默认只允许 localhost Origin，因此不能直接通过 WSL2 IP 访问；请使用 Windows 端口转发，并通过 `http://localhost:8765` 访问。
+
+在 PowerShell（管理员）中设置端口转发：
 
 ```powershell
 netsh interface portproxy add v4tov4 listenport=8765 listenaddress=0.0.0.0 connectport=8765 connectaddress=$(wsl hostname -I)

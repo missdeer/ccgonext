@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
+const DEFAULT_WINDOWS_ENTER_DELAY_MS: u64 = 200;
 
 const TERMINAL_QUERY_TAIL_BYTES: usize = 3;
 
@@ -197,6 +198,7 @@ pub struct PtyHandle {
     buffer: Arc<Mutex<PtyBuffer>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
+    windows_enter_delay: std::time::Duration,
 }
 
 enum PtyCommand {
@@ -217,6 +219,20 @@ impl PtyHandle {
         command: &[String],
         working_dir: &Path,
         buffer_limit: usize,
+    ) -> Result<Self> {
+        Self::spawn_command_with_windows_enter_delay_ms(
+            command,
+            working_dir,
+            buffer_limit,
+            DEFAULT_WINDOWS_ENTER_DELAY_MS,
+        )
+    }
+
+    pub fn spawn_command_with_windows_enter_delay_ms(
+        command: &[String],
+        working_dir: &Path,
+        buffer_limit: usize,
+        windows_enter_delay_ms: u64,
     ) -> Result<Self> {
         if command.is_empty() {
             anyhow::bail!("Empty command");
@@ -362,6 +378,7 @@ impl PtyHandle {
             buffer,
             child,
             shutdown,
+            windows_enter_delay: std::time::Duration::from_millis(windows_enter_delay_ms),
         })
     }
 
@@ -436,9 +453,9 @@ impl PtyHandle {
         {
             tracing::debug!("[PTY] Sending Enter key (CR, delay, LF, delay, backspace)");
             self.write(b"\r").await?;
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(self.windows_enter_delay).await;
             self.write(b"\n").await?;
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(self.windows_enter_delay).await;
             self.write(b"\x08").await
         }
         #[cfg(not(windows))]
@@ -588,13 +605,22 @@ impl Drop for PtyHandle {
 pub struct PtyManager {
     handles: Arc<Mutex<std::collections::HashMap<String, Arc<PtyHandle>>>>,
     buffer_limit: usize,
+    windows_enter_delay_ms: u64,
 }
 
 impl PtyManager {
     pub fn new(buffer_limit: usize) -> Self {
+        Self::new_with_windows_enter_delay_ms(buffer_limit, DEFAULT_WINDOWS_ENTER_DELAY_MS)
+    }
+
+    pub fn new_with_windows_enter_delay_ms(
+        buffer_limit: usize,
+        windows_enter_delay_ms: u64,
+    ) -> Self {
         Self {
             handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
             buffer_limit,
+            windows_enter_delay_ms,
         }
     }
 
@@ -604,10 +630,11 @@ impl PtyManager {
         command: &[String],
         working_dir: &Path,
     ) -> Result<Arc<PtyHandle>> {
-        let handle = Arc::new(PtyHandle::spawn_command(
+        let handle = Arc::new(PtyHandle::spawn_command_with_windows_enter_delay_ms(
             command,
             working_dir,
             self.buffer_limit,
+            self.windows_enter_delay_ms,
         )?);
         self.handles
             .lock()

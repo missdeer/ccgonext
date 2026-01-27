@@ -9,7 +9,7 @@ use axum::{
 
 use super::AppState;
 
-const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1"];
+const ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 
 pub fn validate_origin(headers: &HeaderMap, allowed_port: u16) -> bool {
     let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
@@ -26,17 +26,24 @@ pub fn validate_origin(headers: &HeaderMap, allowed_port: u16) -> bool {
         .or_else(|| origin.strip_prefix("https://"))
         .unwrap_or(origin);
 
-    // Split host:port
-    let (host, port) = if let Some(colon_pos) = host_part.rfind(':') {
-        let host = &host_part[..colon_pos];
-        let port_str = &host_part[colon_pos + 1..];
-        let port = port_str
-            .split('/')
-            .next()
+    let host_port = host_part.split('/').next().unwrap_or(host_part);
+
+    // Split host:port (supports bracketed IPv6: [::1]:1234)
+    let (host, port) = if let Some(host_port) = host_port.strip_prefix('[') {
+        let Some(end) = host_port.find(']') else {
+            return false;
+        };
+        let host = &host_port[..end];
+        let port = host_port[end + 1..]
+            .strip_prefix(':')
             .and_then(|p| p.parse::<u16>().ok());
         (host, port)
     } else {
-        (host_part.split('/').next().unwrap_or(host_part), None)
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port_str)) => (host, port_str.parse::<u16>().ok()),
+            None => (host_port, None),
+        };
+        (host, port)
     };
 
     // Strict host matching
@@ -73,7 +80,7 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let port = state.config.server.port;
+    let port = state.server_port;
 
     // Validate origin for all requests
     if !validate_origin(&headers, port) {

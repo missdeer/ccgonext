@@ -140,6 +140,7 @@ pub struct WebConfig {
     pub auth_token: Option<String>,
     pub input_enabled: bool,
     pub output_buffer_size: usize,
+    pub project_root: String,
 }
 
 impl Default for WebConfig {
@@ -148,6 +149,7 @@ impl Default for WebConfig {
             auth_token: None,
             input_enabled: false,
             output_buffer_size: 10 * 1024 * 1024, // 10MB
+            project_root: String::new(),
         }
     }
 }
@@ -232,6 +234,7 @@ mod tests {
         assert!(web.auth_token.is_none());
         assert!(!web.input_enabled);
         assert_eq!(web.output_buffer_size, 10 * 1024 * 1024);
+        assert!(web.project_root.is_empty());
     }
 
     #[test]

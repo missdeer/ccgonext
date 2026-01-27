@@ -52,7 +52,8 @@ Add to your Claude Code MCP configuration:
 # Start web server only
 ccgonext web
 
-# Open browser to http://localhost:8765
+# Or auto-open the UI in your browser
+ccgonext web --open-browser
 ```
 
 ## Usage
@@ -68,6 +69,10 @@ Commands:
 Options:
   -p, --port <PORT>           Web server port [env: CCGONEXT_PORT] [default: 8765]
       --host <HOST>           Web server host [env: CCGONEXT_HOST] [default: 127.0.0.1]
+      --port-retry <COUNT>    Retry binding to successive ports if the port is in use [env: CCGONEXT_PORT_RETRY] [default: 0]
+      --open-browser          Auto-open the web UI in a browser (web mode only) [env: CCGONEXT_OPEN_BROWSER]
+      --show-project-root     Expose local project root path in the web UI/status API [env: CCGONEXT_SHOW_PROJECT_ROOT]
+      --windows-enter-delay-ms <MS>  Windows: delay between CR/LF in Enter key sequence [env: CCGONEXT_WINDOWS_ENTER_DELAY_MS] [default: 200]
       --input-enabled         Enable web terminal input [env: CCGONEXT_INPUT_ENABLED]
       --auth-token <TOKEN>    Auth token for web API [env: CCGONEXT_AUTH_TOKEN]
       --buffer-size <SIZE>    Output buffer size in bytes [env: CCGONEXT_BUFFER_SIZE] [default: 10485760]
@@ -77,6 +82,10 @@ Options:
       --opencode-cmd <CMD>    OpenCode command [env: CCGONEXT_OPENCODE_CMD] [default: opencode]
       --claudecode-cmd <CMD>  ClaudeCode command [env: CCGONEXT_CLAUDECODE_CMD] [default: claude]
       --agents <LIST>         Agents to enable (comma-separated: codex,gemini,opencode,claudecode) [env: CCGONEXT_AGENTS] [default: codex,gemini,opencode]
+      --max-start-retries <N>  Maximum number of retries when agent fails to start [env: CCGONEXT_MAX_START_RETRIES] [default: 3]
+      --start-retry-delay <MS> Base delay in milliseconds for exponential backoff between retries [env: CCGONEXT_START_RETRY_DELAY] [default: 1000]
+      --log-file <PATH>       Log file path (optional, if not set logs only go to stderr) [env: CCGONEXT_LOG_FILE]
+      --log-dir <PATH>        Log directory for rotating logs [env: CCGONEXT_LOG_DIR]
   -h, --help                  Print help
   -V, --version               Print version
 ```
@@ -141,10 +150,14 @@ All CLI options can be set via environment variables:
 ```bash
 export CCGONEXT_PORT=9000
 export CCGONEXT_HOST=0.0.0.0
+export CCGONEXT_PORT_RETRY=20
 export CCGONEXT_INPUT_ENABLED=true
 export CCGONEXT_AUTH_TOKEN=your-secret-token
+export CCGONEXT_OPEN_BROWSER=true
+export CCGONEXT_SHOW_PROJECT_ROOT=true
+export CCGONEXT_WINDOWS_ENTER_DELAY_MS=200
 export CCGONEXT_AGENTS=codex,gemini
-ccgonext
+ccgonext web
 ```
 
 ## WSL2 Network Access
@@ -152,14 +165,13 @@ ccgonext
 When running in WSL2, to access the web UI from Windows:
 
 ```bash
-# Bind to all interfaces
-ccgonext --host 0.0.0.0
-
-# Access via WSL2 IP from Windows
-# Get WSL2 IP: ip addr show eth0 | grep "inet "
+# Bind to all interfaces inside WSL (so Windows can reach it)
+ccgonext web --host 0.0.0.0
 ```
 
-Or set up port forwarding in PowerShell (Admin):
+The web UI enforces a localhost-only Origin check by default, so accessing via the WSL IP won't work. Use Windows port forwarding and access via `http://localhost:8765`.
+
+Set up port forwarding in PowerShell (Admin):
 
 ```powershell
 netsh interface portproxy add v4tov4 listenport=8765 listenaddress=0.0.0.0 connectport=8765 connectaddress=$(wsl hostname -I)
