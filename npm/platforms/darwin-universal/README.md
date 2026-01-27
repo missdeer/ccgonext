@@ -19,7 +19,7 @@ npm install -g ccgonext
 
 ## License
 
-MIT
+GPL-3.0-only OR Commercial
 
 ## Author
 

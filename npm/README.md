@@ -31,4 +31,4 @@ ccgonext config
 
 ## License
 
-MIT - see [LICENSE](https://github.com/missdeer/ccgonext/blob/master/LICENSE) for details.
+GPL-3.0-only OR Commercial - see [LICENSE](https://github.com/missdeer/ccgonext/blob/master/LICENSE) for details.
