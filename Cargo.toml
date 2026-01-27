@@ -1,10 +1,10 @@
 [package]
 name = "ccgonext"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-authors = ["Claude Code Bridge Team"]
+authors = ["missdeer"]
 description = "ClaudeCode-Codex-Gemini-OpenCode Next MCP Server - Multi-AI collaboration bridge"
-license = "MIT"
+license = "GPL-3.0-only OR LicenseRef-Commercial"
 repository = "https://github.com/missdeer/ccgonext"
 keywords = ["mcp", "ai", "claude", "codex", "gemini"]
 categories = ["command-line-utilities", "development-tools"]
