@@ -207,82 +207,28 @@ fn build_config(cli: &Cli) -> Config {
     if enabled_agents.contains(&"codex") {
         agents.insert(
             "codex".to_string(),
-            AgentConfig {
-                command: cli.codex_cmd.clone(),
-                args: vec![
-                    "-a".to_string(),
-                    "never".to_string(),
-                    "-s".to_string(),
-                    "read-only".to_string(),
-                    "--skip-git-repo-check".to_string(),
-                ],
-                log_provider: "codex".to_string(),
-                ready_pattern: r"^(>|codex>)".to_string(),
-                error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
-                supports_cwd: false,
-                sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
-                sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
-                done_template: "CCGO_DONE: {id}".to_string(),
-                done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
-            },
+            AgentConfig::codex_default().with_command(cli.codex_cmd.clone()),
         );
     }
 
     if enabled_agents.contains(&"gemini") {
         agents.insert(
             "gemini".to_string(),
-            AgentConfig {
-                command: cli.gemini_cmd.clone(),
-                args: vec!["--yolo".to_string()],
-                log_provider: "gemini".to_string(),
-                ready_pattern: r"(Gemini|>\s*$)".to_string(),
-                error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
-                supports_cwd: false,
-                sentinel_template: "[MSG_ID:{id}]\n{message}".to_string(),
-                sentinel_regex: r"\[MSG_ID:([a-f0-9-]+)\]".to_string(),
-                done_template: "CCGO_DONE: {id}".to_string(),
-                done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
-            },
+            AgentConfig::gemini_default().with_command(cli.gemini_cmd.clone()),
         );
     }
 
     if enabled_agents.contains(&"opencode") {
         agents.insert(
             "opencode".to_string(),
-            AgentConfig {
-                command: cli.opencode_cmd.clone(),
-                args: vec![],
-                log_provider: "opencode".to_string(),
-                ready_pattern: r"(opencode|>\s*$)".to_string(),
-                error_patterns: vec!["ERROR".to_string(), "Exception".to_string()],
-                supports_cwd: false,
-                sentinel_template: "[[MSG:{id}]]\n{message}".to_string(),
-                sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
-                done_template: "CCGO_DONE: {id}".to_string(),
-                done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
-            },
+            AgentConfig::opencode_default().with_command(cli.opencode_cmd.clone()),
         );
     }
 
     if enabled_agents.contains(&"claudecode") {
         agents.insert(
             "claudecode".to_string(),
-            AgentConfig {
-                command: cli.claudecode_cmd.clone(),
-                args: vec![],
-                log_provider: "pty".to_string(),
-                ready_pattern: r"(?m)^>\s*$".to_string(),
-                error_patterns: vec![
-                    r"(?i)^error:".to_string(),
-                    r"(?i)^failed".to_string(),
-                    r"(?i)^fatal".to_string(),
-                ],
-                supports_cwd: false,
-                sentinel_template: "# CCGONEXT_MSG_ID:{id}\n{message}".to_string(),
-                sentinel_regex: r"(?i)#\s*CCGONEXT_MSG_ID:\s*([0-9a-f-]{36})".to_string(),
-                done_template: "CCGO_DONE: {id}".to_string(),
-                done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
-            },
+            AgentConfig::claudecode_default().with_command(cli.claudecode_cmd.clone()),
         );
     }
 
