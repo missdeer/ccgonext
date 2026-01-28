@@ -54,6 +54,7 @@ pub struct AgentConfig {
     pub sentinel_regex: String,
     pub done_template: String,
     pub done_regex: String,
+    pub use_stability_heuristic: bool,
 }
 
 impl AgentConfig {
@@ -70,6 +71,7 @@ impl AgentConfig {
             sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
+            use_stability_heuristic: true,
         }
     }
 
@@ -86,6 +88,7 @@ impl AgentConfig {
             sentinel_regex: r"\[MSG_ID:([a-f0-9-]+)\]".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
+            use_stability_heuristic: false,
         }
     }
 
@@ -102,6 +105,7 @@ impl AgentConfig {
             sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
+            use_stability_heuristic: true,
         }
     }
 
@@ -122,6 +126,7 @@ impl AgentConfig {
             sentinel_regex: r"(?i)#\s*CCGONEXT_MSG_ID:\s*([0-9a-f-]{36})".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
+            use_stability_heuristic: true,
         }
     }
 

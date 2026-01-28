@@ -1031,6 +1031,14 @@ impl AgentSession {
         const QUIET_MS: u64 = 2000; // 2 seconds quiet required
         const MIN_STABLE_CHECKS: u32 = 5; // Require 5 unchanged checks
 
+        let allow_stability_heuristic = adapter.use_stability_heuristic();
+        if !allow_stability_heuristic {
+            tracing::debug!(
+                "[StableReply] Stability heuristic disabled for {} (wait for done marker or timeout)",
+                adapter.name()
+            );
+        }
+
         let poll = Duration::from_millis(POLL_MS);
         let quiet = Duration::from_millis(QUIET_MS);
 
@@ -1049,7 +1057,10 @@ impl AgentSession {
             let time_since_change = Instant::now().duration_since(last_change);
 
             // Check if we've had enough stable checks after quiet period
-            if time_since_change >= quiet && stable_check_count >= MIN_STABLE_CHECKS {
+            if allow_stability_heuristic
+                && time_since_change >= quiet
+                && stable_check_count >= MIN_STABLE_CHECKS
+            {
                 tracing::warn!(
                     "[StableReply] Returning via stability heuristic after {}ms quiet, {} checks, {} bytes. \
                     Agent may not have output CCGO_DONE marker with correct ID.",

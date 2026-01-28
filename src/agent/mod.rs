@@ -36,6 +36,10 @@ pub trait Agent: Send + Sync {
 
     fn strip_done_marker(&self, text: &str, message_id: &str) -> String;
 
+    fn use_stability_heuristic(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -50,6 +54,7 @@ pub struct GenericAgent {
     sentinel_regex: String,
     done_template: String,
     done_regex: String,
+    use_stability_heuristic: bool,
 }
 
 impl GenericAgent {
@@ -65,6 +70,7 @@ impl GenericAgent {
             sentinel_regex: config.sentinel_regex.clone(),
             done_template: config.done_template.clone(),
             done_regex: config.done_regex.clone(),
+            use_stability_heuristic: config.use_stability_heuristic,
         }
     }
 }
@@ -159,6 +165,10 @@ impl Agent for GenericAgent {
         result_lines.join("\n").trim_end().to_string()
     }
 
+    fn use_stability_heuristic(&self) -> bool {
+        self.use_stability_heuristic
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -194,6 +204,7 @@ mod tests {
             sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
+            use_stability_heuristic: true,
         }
     }
 

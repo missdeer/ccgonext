@@ -121,6 +121,7 @@ async fn test_claudecode_type_detection() {
         sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
         done_template: "CCGO_DONE: {id}".to_string(),
         done_regex: r"(?m)CCGO_DONE:\s*([a-f0-9-]+)".to_string(),
+        use_stability_heuristic: true,
     };
     let codex = Arc::new(GenericAgent::new("codex".to_string(), &codex_config));
 
