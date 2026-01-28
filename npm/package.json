@@ -1,6 +1,6 @@
 {
   "name": "ccgonext",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "ClaudeCode-Codex-Gemini-OpenCode MCP Server - Multi-AI collaboration bridge",
   "publishConfig": {
     "access": "public"
@@ -44,10 +44,10 @@
     "arm64"
   ],
   "optionalDependencies": {
-    "@ccgonext/darwin-universal": "0.1.2",
-    "@ccgonext/linux-x64": "0.1.2",
-    "@ccgonext/linux-arm64": "0.1.2",
-    "@ccgonext/win32-x64": "0.1.2",
-    "@ccgonext/win32-arm64": "0.1.2"
+    "@ccgonext/darwin-universal": "0.1.3",
+    "@ccgonext/linux-x64": "0.1.3",
+    "@ccgonext/linux-arm64": "0.1.3",
+    "@ccgonext/win32-x64": "0.1.3",
+    "@ccgonext/win32-arm64": "0.1.3"
   }
 }
