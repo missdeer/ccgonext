@@ -209,7 +209,13 @@ fn build_config(cli: &Cli) -> Config {
             "codex".to_string(),
             AgentConfig {
                 command: cli.codex_cmd.clone(),
-                args: vec![],
+                args: vec![
+                    "-a".to_string(),
+                    "never".to_string(),
+                    "-s".to_string(),
+                    "read-only".to_string(),
+                    "--skip-git-repo-check".to_string(),
+                ],
                 log_provider: "codex".to_string(),
                 ready_pattern: r"^(>|codex>)".to_string(),
                 error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
@@ -227,7 +233,7 @@ fn build_config(cli: &Cli) -> Config {
             "gemini".to_string(),
             AgentConfig {
                 command: cli.gemini_cmd.clone(),
-                args: vec![],
+                args: vec!["--yolo".to_string()],
                 log_provider: "gemini".to_string(),
                 ready_pattern: r"(Gemini|>\s*$)".to_string(),
                 error_patterns: vec!["Error:".to_string(), "Failed".to_string()],
