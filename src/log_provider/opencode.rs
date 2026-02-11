@@ -287,21 +287,44 @@ impl OpenCodeLogProvider {
         parts
     }
 
+    fn starts_with_done_marker(text: &str) -> bool {
+        const PREFIX: &[u8] = b"CCGO_DONE:";
+        let trimmed = text.trim_start();
+        let bytes = trimmed.as_bytes();
+        bytes
+            .get(..PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
+    }
+
+    fn stitch_parts_text<'a>(chunks: impl Iterator<Item = &'a str>) -> String {
+        let mut out = String::new();
+
+        for chunk in chunks {
+            if !out.is_empty()
+                && Self::starts_with_done_marker(chunk)
+                && !out.ends_with('\n')
+                && !out.ends_with('\r')
+                && !chunk.starts_with('\n')
+                && !chunk.starts_with('\r')
+            {
+                // Preserve normal chunk concatenation, but force done marker onto a new line.
+                out.push('\n');
+            }
+            out.push_str(chunk);
+        }
+
+        out.trim().to_string()
+    }
+
     fn extract_text(&self, parts: &[serde_json::Value], allow_reasoning_fallback: bool) -> String {
         let collect = |types: &[&str]| -> String {
-            parts
-                .iter()
-                .filter(|p| {
-                    p.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| types.contains(&t))
-                        .unwrap_or(false)
-                })
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("")
-                .trim()
-                .to_string()
+            Self::stitch_parts_text(parts.iter().filter_map(|p| {
+                let part_type = p.get("type").and_then(|t| t.as_str())?;
+                if !types.contains(&part_type) {
+                    return None;
+                }
+                p.get("text").and_then(|t| t.as_str())
+            }))
         };
 
         let text = collect(&["text"]);
@@ -558,5 +581,43 @@ impl LogProvider for OpenCodeLogProvider {
             tracing::debug!("[OpenCodeLogProvider] Session unlocked");
         }
         *locked = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenCodeLogProvider;
+
+    #[test]
+    fn test_stitch_parts_text_preserves_plain_chunks() {
+        let chunks = ["Hello".to_string(), " world".to_string()];
+        let text = OpenCodeLogProvider::stitch_parts_text(chunks.iter().map(|s| s.as_str()));
+        assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn test_stitch_parts_text_newline_before_done_marker_chunk() {
+        let chunks = [
+            "Answer body".to_string(),
+            "CCGO_DONE: 12345678-1234-1234-1234-123456789abc".to_string(),
+        ];
+        let text = OpenCodeLogProvider::stitch_parts_text(chunks.iter().map(|s| s.as_str()));
+        assert_eq!(
+            text,
+            "Answer body\nCCGO_DONE: 12345678-1234-1234-1234-123456789abc"
+        );
+    }
+
+    #[test]
+    fn test_stitch_parts_text_no_double_newline_if_already_terminated() {
+        let chunks = [
+            "Answer body\n".to_string(),
+            "CCGO_DONE: 12345678-1234-1234-1234-123456789abc".to_string(),
+        ];
+        let text = OpenCodeLogProvider::stitch_parts_text(chunks.iter().map(|s| s.as_str()));
+        assert_eq!(
+            text,
+            "Answer body\nCCGO_DONE: 12345678-1234-1234-1234-123456789abc"
+        );
     }
 }

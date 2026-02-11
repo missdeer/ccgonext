@@ -105,7 +105,7 @@ impl AgentConfig {
             sentinel_regex: r"\[\[MSG:([a-f0-9-]+)\]\]".to_string(),
             done_template: "CCGO_DONE: {id}".to_string(),
             done_regex: r"(?mi)^\s*CCGO_DONE:\s*{id}\s*$".to_string(),
-            use_stability_heuristic: true,
+            use_stability_heuristic: false,
         }
     }
 
