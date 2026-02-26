@@ -1,6 +1,6 @@
 {
   "name": "@ccgonext/win32-x64",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Platform-specific binary for ccgonext (Windows x64)",
   "license": "MIT",
   "repository": {

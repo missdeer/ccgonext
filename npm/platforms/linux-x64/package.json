@@ -1,6 +1,6 @@
 {
   "name": "@ccgonext/linux-x64",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Platform-specific binary for ccgonext (Linux x64)",
   "license": "MIT",
   "repository": {

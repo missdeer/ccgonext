@@ -1,6 +1,6 @@
 [package]
 name = "ccgonext"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["missdeer"]
 description = "ClaudeCode-Codex-Gemini-OpenCode Next MCP Server - Multi-AI collaboration bridge"
