@@ -1,6 +1,6 @@
 # Codex Tool Usage
 
-The Codex Tool provides a `codex` tool for **debugging, complex problem solving, and code review**. Launch `codex exec -read-only --skip-git-repo-check --full-auto "$PROMPT"` command line directly to execute. Run in background. Timeout: 30m.
+The Codex Tool provides a `codex` tool for **debugging, complex problem solving, and code review**. Use ccgo to ask codex to execute commands. Timeout: 15m.
 
 ## Role
 

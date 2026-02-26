@@ -1,6 +1,6 @@
 # Gemini Tool Usage
 
-The Gemini Tool provides a `gemini` tool for AI tasks. Launch `gemini --yolo -p "$PROMPT"` command line directly to execute. Run in background. Timeout: 30m.
+The Gemini Tool provides a `gemini` tool for AI tasks. Use `ccgo` to ask gemini to execute commands. Timeout: 30m.
 
 ## Scope
 
