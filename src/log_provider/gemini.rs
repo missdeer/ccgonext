@@ -277,7 +277,32 @@ impl GeminiLogProvider {
             .filter_map(|msg| {
                 // Gemini uses "type" instead of "role"
                 let role = msg.get("type")?.as_str()?.to_string();
-                let content = msg.get("content")?.as_str()?.to_string();
+
+                // Handle both string and array content formats
+                // Old format: "content": "text"
+                // New format: "content": [{"text": "text"}]
+                let content = match msg.get("content")? {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(arr) => {
+                        // Extract text from array of objects: [{"text": "..."}]
+                        let joined = arr
+                            .iter()
+                            .filter_map(|item| {
+                                item.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        // Skip messages with no text content (e.g., tool/image-only)
+                        if joined.is_empty() {
+                            return None;
+                        }
+                        joined
+                    }
+                    _ => return None,
+                };
+
                 let timestamp = msg
                     .get("timestamp")
                     .and_then(|t| t.as_str())
@@ -430,7 +455,6 @@ impl GeminiLogProvider {
     fn scan_newer_session(
         &self,
         locked_file: &PathBuf,
-        since_offset: u64,
         baseline_timestamp: DateTime<Utc>,
         default_timestamp: DateTime<Utc>,
     ) -> Option<(LogEntry, u64)> {
@@ -465,21 +489,17 @@ impl GeminiLogProvider {
             total_messages
         );
 
-        // First try offset-based search
-        if let Some(entry) = self.find_assistant_reply(&entries, since_offset) {
-            return Some((entry, total_messages));
-        }
-
-        // Fall back to timestamp-based search if baseline is valid
         if baseline_timestamp != default_timestamp {
             if let Some(entry) =
                 self.find_assistant_reply_by_timestamp(&entries, baseline_timestamp)
             {
                 return Some((entry, total_messages));
             }
+            return None;
         }
 
-        None
+        self.find_assistant_reply(&entries, 0)
+            .map(|entry| (entry, total_messages))
     }
 }
 
@@ -574,12 +594,9 @@ impl LogProvider for GeminiLogProvider {
                 "[GeminiLogProvider] No reply in locked session, checking for newer files"
             );
 
-            if let Some((result, total_messages)) = self.scan_newer_session(
-                &chat_file,
-                since_offset,
-                baseline_timestamp,
-                default_timestamp,
-            ) {
+            if let Some((result, total_messages)) =
+                self.scan_newer_session(&chat_file, baseline_timestamp, default_timestamp)
+            {
                 self.current_offset.store(total_messages, Ordering::SeqCst);
                 tracing::info!(
                     "[GeminiLogProvider] Found assistant reply in newer file, offset={}",
@@ -834,6 +851,294 @@ mod tests {
         assert!(
             found.is_some(),
             "Should find session via global scan fallback"
+        );
+    }
+
+    #[test]
+    fn parse_chat_json_handles_string_content() {
+        let provider = GeminiLogProvider::new(None);
+        let json = r#"{
+  "messages": [
+    {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":"hello"},
+    {"id":"2","timestamp":"2026-01-01T00:01:00.000Z","type":"gemini","content":"world"}
+  ]
+}"#;
+        let entries = provider.parse_chat_json(json);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "user");
+        assert_eq!(entries[0].1, "hello");
+        assert_eq!(entries[1].0, "gemini");
+        assert_eq!(entries[1].1, "world");
+    }
+
+    #[test]
+    fn parse_chat_json_handles_array_content() {
+        let provider = GeminiLogProvider::new(None);
+        let json = r#"{
+  "messages": [
+    {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":[{"text":"hello from array"}]},
+    {"id":"2","timestamp":"2026-01-01T00:01:00.000Z","type":"gemini","content":"reply text"}
+  ]
+}"#;
+        let entries = provider.parse_chat_json(json);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "user");
+        assert_eq!(entries[0].1, "hello from array");
+        assert_eq!(entries[1].0, "gemini");
+        assert_eq!(entries[1].1, "reply text");
+    }
+
+    #[test]
+    fn parse_chat_json_array_content_joins_multiple_text_parts() {
+        let provider = GeminiLogProvider::new(None);
+        let json = r#"{
+  "messages": [
+    {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":[{"text":"part1"},{"text":"part2"}]}
+  ]
+}"#;
+        let entries = provider.parse_chat_json(json);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "part1\npart2");
+    }
+
+    #[test]
+    fn scan_newer_session_finds_reply_from_offset_zero() {
+        let root = tempdir().unwrap();
+        let working_dir = r"D:\test\project";
+
+        let project_dir = root.path().join("project");
+        let chats_dir = project_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(project_dir.join(".project_root"), working_dir).unwrap();
+
+        // Old session file (locked)
+        let old_session = chats_dir.join("session-2026-01-01T00-00-old.json");
+        fs::write(
+            &old_session,
+            r#"{"messages":[
+                {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":"q1"},
+                {"id":"2","timestamp":"2026-01-01T00:01:00.000Z","type":"gemini","content":"a1"}
+            ]}"#,
+        )
+        .unwrap();
+
+        // Small delay to ensure different mtime
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // New session file with array-format user content and CCGO_DONE
+        let new_session = chats_dir.join("session-2026-02-01T00-00-new.json");
+        fs::write(
+            &new_session,
+            r#"{"messages":[
+                {"id":"3","timestamp":"2026-02-01T00:00:00.000Z","type":"user","content":[{"text":"q2"}]},
+                {"id":"4","timestamp":"2026-02-01T00:01:00.000Z","type":"gemini","content":"answer\n\nCCGO_DONE: test-id"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mut cfg = HashMap::new();
+        cfg.insert(
+            "path_pattern".to_string(),
+            root.path().to_string_lossy().to_string(),
+        );
+        cfg.insert("working_dir".to_string(), working_dir.to_string());
+
+        let provider = GeminiLogProvider::new(Some(&cfg));
+
+        let baseline_ts = DateTime::parse_from_rfc3339("2026-01-01T00:01:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let default_ts = GeminiLogProvider::default_timestamp();
+
+        let result = provider.scan_newer_session(&old_session, baseline_ts, default_ts);
+        assert!(result.is_some(), "Should find reply in newer session file");
+
+        let (entry, _total) = result.unwrap();
+        assert!(entry.content.contains("CCGO_DONE: test-id"));
+        assert!(entry.done_seen);
+    }
+
+    #[test]
+    fn scan_newer_session_rejects_stale_reply_before_baseline() {
+        let root = tempdir().unwrap();
+        let working_dir = r"D:\test\project";
+
+        let project_dir = root.path().join("project");
+        let chats_dir = project_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(project_dir.join(".project_root"), working_dir).unwrap();
+
+        let old_session = chats_dir.join("session-2026-01-01T00-00-old.json");
+        fs::write(
+            &old_session,
+            r#"{"messages":[
+                {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":"q1"},
+                {"id":"2","timestamp":"2026-01-01T00:01:00.000Z","type":"gemini","content":"a1"}
+            ]}"#,
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // New session already contains old assistant reply (before baseline)
+        let new_session = chats_dir.join("session-2026-02-01T00-00-new.json");
+        fs::write(
+            &new_session,
+            r#"{"messages":[
+                {"id":"3","timestamp":"2026-01-15T00:00:00.000Z","type":"user","content":"old q"},
+                {"id":"4","timestamp":"2026-01-15T00:01:00.000Z","type":"gemini","content":"old stale answer\n\nCCGO_DONE: stale-id"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mut cfg = HashMap::new();
+        cfg.insert(
+            "path_pattern".to_string(),
+            root.path().to_string_lossy().to_string(),
+        );
+        cfg.insert("working_dir".to_string(), working_dir.to_string());
+
+        let provider = GeminiLogProvider::new(Some(&cfg));
+
+        // Baseline is AFTER the stale reply timestamp
+        let baseline_ts = DateTime::parse_from_rfc3339("2026-01-20T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let default_ts = GeminiLogProvider::default_timestamp();
+
+        let result = provider.scan_newer_session(&old_session, baseline_ts, default_ts);
+        assert!(
+            result.is_none(),
+            "Should NOT return stale reply older than baseline"
+        );
+    }
+
+    #[test]
+    fn parse_chat_json_skips_array_content_with_no_text() {
+        let provider = GeminiLogProvider::new(None);
+        let json = r#"{
+  "messages": [
+    {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":[{"image":"data:..."}]},
+    {"id":"2","timestamp":"2026-01-01T00:01:00.000Z","type":"gemini","content":"reply"}
+  ]
+}"#;
+        let entries = provider.parse_chat_json(json);
+        assert_eq!(entries.len(), 1, "Should skip message with no text content");
+        assert_eq!(entries[0].0, "gemini");
+        assert_eq!(entries[0].1, "reply");
+    }
+
+    #[test]
+    fn scan_newer_session_accepts_reply_after_baseline() {
+        let root = tempdir().unwrap();
+        let working_dir = r"D:\test\project";
+
+        let project_dir = root.path().join("project");
+        let chats_dir = project_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(project_dir.join(".project_root"), working_dir).unwrap();
+
+        let old_session = chats_dir.join("session-2026-01-01T00-00-old.json");
+        fs::write(
+            &old_session,
+            r#"{"messages":[
+                {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":"q1"}
+            ]}"#,
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // New session: old stale reply + new valid reply
+        let new_session = chats_dir.join("session-2026-02-01T00-00-new.json");
+        fs::write(
+            &new_session,
+            r#"{"messages":[
+                {"id":"2","timestamp":"2026-01-10T00:00:00.000Z","type":"gemini","content":"old answer"},
+                {"id":"3","timestamp":"2026-02-01T00:00:00.000Z","type":"user","content":"new q"},
+                {"id":"4","timestamp":"2026-02-01T00:01:00.000Z","type":"gemini","content":"new answer\n\nCCGO_DONE: new-id"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mut cfg = HashMap::new();
+        cfg.insert(
+            "path_pattern".to_string(),
+            root.path().to_string_lossy().to_string(),
+        );
+        cfg.insert("working_dir".to_string(), working_dir.to_string());
+
+        let provider = GeminiLogProvider::new(Some(&cfg));
+
+        // Baseline between old and new replies
+        let baseline_ts = DateTime::parse_from_rfc3339("2026-01-15T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let default_ts = GeminiLogProvider::default_timestamp();
+
+        let result = provider.scan_newer_session(&old_session, baseline_ts, default_ts);
+        assert!(result.is_some(), "Should find new reply after baseline");
+
+        let (entry, _) = result.unwrap();
+        assert!(
+            entry.content.contains("new answer"),
+            "Should return the new reply, not the old one"
+        );
+        assert!(entry.done_seen);
+    }
+
+    #[test]
+    fn scan_newer_session_handles_missing_timestamp_gracefully() {
+        let root = tempdir().unwrap();
+        let working_dir = r"D:\test\project";
+
+        let project_dir = root.path().join("project");
+        let chats_dir = project_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(project_dir.join(".project_root"), working_dir).unwrap();
+
+        let old_session = chats_dir.join("session-2026-01-01T00-00-old.json");
+        fs::write(
+            &old_session,
+            r#"{"messages":[
+                {"id":"1","timestamp":"2026-01-01T00:00:00.000Z","type":"user","content":"q1"}
+            ]}"#,
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // New session with assistant reply but missing timestamp (will parse as epoch)
+        let new_session = chats_dir.join("session-2026-02-01T00-00-new.json");
+        fs::write(
+            &new_session,
+            r#"{"messages":[
+                {"id":"2","type":"user","content":"new q"},
+                {"id":"3","type":"gemini","content":"new answer\n\nCCGO_DONE: new-id"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mut cfg = HashMap::new();
+        cfg.insert(
+            "path_pattern".to_string(),
+            root.path().to_string_lossy().to_string(),
+        );
+        cfg.insert("working_dir".to_string(), working_dir.to_string());
+
+        let provider = GeminiLogProvider::new(Some(&cfg));
+
+        let baseline_ts = DateTime::parse_from_rfc3339("2026-01-15T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let default_ts = GeminiLogProvider::default_timestamp();
+
+        let result = provider.scan_newer_session(&old_session, baseline_ts, default_ts);
+        // With valid baseline, timestamp-based search will fail (epoch < baseline)
+        // This is expected behavior: missing timestamps are treated as invalid/old
+        assert!(
+            result.is_none(),
+            "Should return None when new session has missing timestamps (safer than false positive)"
         );
     }
 }
