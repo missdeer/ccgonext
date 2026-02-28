@@ -76,9 +76,8 @@
             font-size: 0.8rem;
             color: #666;
             padding: 0.3rem 0.6rem;
-            background: #f5f5f5;
-            border: 1px solid #ddd;
-            max-width: 400px;
+            flex: 1;
+            text-align: center;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -441,7 +440,7 @@
                     if (data.project_root) {
                         projectRootEl.textContent = '📁 ' + data.project_root;
                         projectRootEl.title = data.project_root;
-                        projectRootEl.style.display = 'inline-block';
+                        projectRootEl.style.display = 'block';
                     } else {
                         projectRootEl.style.display = 'none';
                     }

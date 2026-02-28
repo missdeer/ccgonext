@@ -39,10 +39,6 @@ struct Cli {
     #[arg(long, env = "CCGONEXT_OPEN_BROWSER")]
     open_browser: bool,
 
-    /// Expose local project root path in the web UI/status API [env: CCGONEXT_SHOW_PROJECT_ROOT]
-    #[arg(long, env = "CCGONEXT_SHOW_PROJECT_ROOT")]
-    show_project_root: bool,
-
     /// Windows: delay between CR/LF in Enter key sequence [env: CCGONEXT_WINDOWS_ENTER_DELAY_MS]
     #[arg(long, default_value = "200", env = "CCGONEXT_WINDOWS_ENTER_DELAY_MS")]
     windows_enter_delay_ms: u64,
@@ -193,14 +189,10 @@ fn init_tracing(cli: &Cli) {
 
 fn build_config(cli: &Cli) -> Config {
     let enabled_agents: Vec<&str> = cli.agents.split(',').map(|s| s.trim()).collect();
-    let project_root = if cli.show_project_root {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .to_string_lossy()
-            .to_string()
-    } else {
-        String::new()
-    };
+    let project_root = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
 
     let mut agents = HashMap::new();
 
