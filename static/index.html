@@ -91,29 +91,31 @@
             padding: 1rem;
             display: grid;
             gap: 1rem;
-            max-width: 1600px;
-            margin: 0 auto;
             width: 100%;
-            align-content: center;
+            grid-auto-rows: 1fr;
         }
         /* Dynamic grid layout based on agent count */
         .container-grid[data-agent-count="1"] {
             grid-template-columns: 1fr;
+            grid-template-rows: 1fr;
         }
         .container-grid[data-agent-count="2"] {
             grid-template-columns: repeat(2, 1fr);
+            grid-template-rows: 1fr;
         }
         .container-grid[data-agent-count="3"] {
             grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: 1fr;
         }
         .container-grid[data-agent-count="4"] {
             grid-template-columns: repeat(2, 1fr);
+            grid-template-rows: repeat(2, 1fr);
         }
         .container-grid[data-agent-count="5"],
         .container-grid[data-agent-count="6"] {
             grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(2, 1fr);
         }
-        /* 7+ agents: use auto-fit for flexibility */
         .container-grid:not([data-agent-count="1"]):not([data-agent-count="2"]):not([data-agent-count="3"]):not([data-agent-count="4"]):not([data-agent-count="5"]):not([data-agent-count="6"]) {
             grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
         }
@@ -124,6 +126,7 @@
             border: 1px solid #000000;
             display: flex;
             flex-direction: column;
+            min-height: 0;
         }
         .agent-header {
             padding: 0.5rem 1rem;
@@ -198,11 +201,15 @@
         .terminal-wrapper {
             flex: 1;
             position: relative;
-            min-height: 250px;
+            min-height: 0;
+            overflow: hidden;
         }
         .terminal-container {
-            width: 100%;
-            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             padding: 0.25rem;
             background: #1a1a2e;
             box-sizing: border-box;
@@ -249,13 +256,6 @@
         .container-full .terminal-wrapper {
             flex: 1;
             min-height: 0;
-        }
-        .container-full .terminal-container {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
         }
 
         .hidden { display: none !important; }
