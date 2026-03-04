@@ -527,7 +527,11 @@ impl AgentSession {
         message: String,
         timeout: Option<Duration>,
         pty_manager: &crate::pty::PtyManager,
+        project_root_path: Option<String>,
     ) -> Result<String, SessionError> {
+        if let Some(ref path) = project_root_path {
+            tracing::debug!("ask() called with project_root_path: {}", path);
+        }
         let timeout = timeout.unwrap_or(Duration::from_secs(self.timeouts.default));
 
         // Auto-start agent if stopped, with retry on failure

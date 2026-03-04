@@ -22,6 +22,8 @@ pub struct AskAgentsArgs {
     pub requests: Vec<AgentRequest>,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    #[serde(default)]
+    pub project_root_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +110,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 600, max: 1800)"
+                },
+                "project_root_path": {
+                    "type": "string",
+                    "description": "Project root directory path. Defaults to the process working directory if not provided."
                 }
             },
             "required": ["requests"]
@@ -135,6 +141,14 @@ async fn execute_ask_agents(
 ) -> Result<String, anyhow::Error> {
     validate_args(&args)?;
 
+    let project_root_path = args.project_root_path.unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .to_string()
+    });
+    tracing::debug!("project_root_path: {}", project_root_path);
+
     let timeout_duration = Duration::from_secs(args.timeout);
     let request_count = args.requests.len();
 
@@ -149,12 +163,13 @@ async fn execute_ask_agents(
         let sm = session_manager.clone();
         let agent = req.agent.clone();
         let message = req.message.clone();
+        let root_path = project_root_path.clone();
 
         let handle = join_set.spawn(async move {
             let result = AssertUnwindSafe(async {
                 // Pass timeout to ask_single_agent to ensure ReplyDetection uses it
                 // This prevents ReplyDetection from continuing beyond the MCP timeout
-                ask_single_agent(&agent, &message, Some(timeout_duration), &sm).await
+                ask_single_agent(&agent, &message, Some(timeout_duration), &root_path, &sm).await
             })
             .catch_unwind()
             .await;
@@ -242,6 +257,7 @@ async fn ask_single_agent(
     agent_name: &str,
     message: &str,
     timeout: Option<Duration>,
+    project_root_path: &str,
     session_manager: &Arc<SessionManager>,
 ) -> Result<String, anyhow::Error> {
     let session = session_manager
@@ -251,7 +267,12 @@ async fn ask_single_agent(
 
     let pty_manager = session_manager.pty_manager();
     let response = session
-        .ask(message.to_string(), timeout, pty_manager)
+        .ask(
+            message.to_string(),
+            timeout,
+            pty_manager,
+            Some(project_root_path.to_string()),
+        )
         .await?;
 
     Ok(response)
@@ -274,6 +295,7 @@ mod tests {
         let args: AskAgentsArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.requests.len(), 2);
         assert_eq!(args.timeout, 300);
+        assert!(args.project_root_path.is_none());
     }
 
     #[test]
@@ -284,6 +306,21 @@ mod tests {
 
         let args: AskAgentsArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.timeout, DEFAULT_TIMEOUT);
+        assert!(args.project_root_path.is_none());
+    }
+
+    #[test]
+    fn test_ask_agents_args_with_project_root_path() {
+        let json = json!({
+            "requests": [{"agent": "codex", "message": "hello"}],
+            "project_root_path": "/home/user/project"
+        });
+
+        let args: AskAgentsArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            args.project_root_path,
+            Some("/home/user/project".to_string())
+        );
     }
 
     #[test]
@@ -291,6 +328,7 @@ mod tests {
         let args = AskAgentsArgs {
             requests: vec![],
             timeout: 600,
+            project_root_path: None,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -321,6 +359,7 @@ mod tests {
                 },
             ],
             timeout: 600,
+            project_root_path: None,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -339,6 +378,7 @@ mod tests {
                 },
             ],
             timeout: 600,
+            project_root_path: None,
         };
         let err = validate_args(&args).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
@@ -352,6 +392,7 @@ mod tests {
                 message: "hello".to_string(),
             }],
             timeout: 600,
+            project_root_path: None,
         };
         let err = validate_args(&args).unwrap_err();
         assert!(err.to_string().contains("invalid agent"));
@@ -365,6 +406,7 @@ mod tests {
                 message: "   ".to_string(),
             }],
             timeout: 600,
+            project_root_path: None,
         };
         let err = validate_args(&args).unwrap_err();
         assert!(err.to_string().contains("empty"));
@@ -378,6 +420,7 @@ mod tests {
                 message: "hello".to_string(),
             }],
             timeout: 0,
+            project_root_path: None,
         };
         assert!(validate_args(&args).is_err());
 
@@ -387,6 +430,7 @@ mod tests {
                 message: "hello".to_string(),
             }],
             timeout: MAX_TIMEOUT + 1,
+            project_root_path: None,
         };
         assert!(validate_args(&args2).is_err());
     }
@@ -405,6 +449,7 @@ mod tests {
                 },
             ],
             timeout: 600,
+            project_root_path: None,
         };
         assert!(validate_args(&args).is_ok());
     }

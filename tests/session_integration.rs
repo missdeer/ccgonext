@@ -88,6 +88,7 @@ async fn test_claudecode_pty_reply_detection() {
             "test message".to_string(),
             Some(Duration::from_secs(10)),
             pty_manager.as_ref(),
+            None,
         );
 
         // Wait for response with timeout
