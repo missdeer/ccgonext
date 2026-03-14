@@ -1,17 +1,15 @@
-//! CCGONEXT CLI - ClaudeCode-Codex-Gemini-OpenCode Next MCP Server
-
 use ccgonext::{
-    agent,
+    acp::callbacks::CallbackPolicy,
     config::{AgentConfig, Config, ServerConfig, TimeoutConfig, WebConfig},
-    log_provider,
+    events::EventLog,
     mcp::McpServer,
-    pty::PtyManager,
-    session::{AgentSession, SessionManager},
+    session::SessionManager,
     web::{WebServer, WebServerRunOptions},
 };
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
@@ -39,28 +37,16 @@ struct Cli {
     #[arg(long, env = "CCGONEXT_OPEN_BROWSER")]
     open_browser: bool,
 
-    /// Windows: delay between CR/LF in Enter key sequence [env: CCGONEXT_WINDOWS_ENTER_DELAY_MS]
-    #[arg(long, default_value = "200", env = "CCGONEXT_WINDOWS_ENTER_DELAY_MS")]
-    windows_enter_delay_ms: u64,
-
-    /// Enable web terminal input [env: CCGONEXT_INPUT_ENABLED]
-    #[arg(long, env = "CCGONEXT_INPUT_ENABLED")]
-    input_enabled: bool,
-
     /// Auth token for web API [env: CCGONEXT_AUTH_TOKEN]
     #[arg(long, env = "CCGONEXT_AUTH_TOKEN")]
     auth_token: Option<String>,
-
-    /// Output buffer size in bytes [env: CCGONEXT_BUFFER_SIZE]
-    #[arg(long, default_value = "10485760", env = "CCGONEXT_BUFFER_SIZE")]
-    buffer_size: usize,
 
     /// Default request timeout in seconds [env: CCGONEXT_TIMEOUT]
     #[arg(long, default_value = "600", env = "CCGONEXT_TIMEOUT")]
     timeout: u64,
 
     /// Codex command [env: CCGONEXT_CODEX_CMD]
-    #[arg(long, default_value = "codex", env = "CCGONEXT_CODEX_CMD")]
+    #[arg(long, default_value = "codex-acp", env = "CCGONEXT_CODEX_CMD")]
     codex_cmd: String,
 
     /// Gemini command [env: CCGONEXT_GEMINI_CMD]
@@ -72,22 +58,42 @@ struct Cli {
     opencode_cmd: String,
 
     /// ClaudeCode command [env: CCGONEXT_CLAUDECODE_CMD]
-    #[arg(long, default_value = "claude", env = "CCGONEXT_CLAUDECODE_CMD")]
+    #[arg(
+        long,
+        default_value = "claude-agent-acp",
+        env = "CCGONEXT_CLAUDECODE_CMD"
+    )]
     claudecode_cmd: String,
 
     /// Agents to enable (comma-separated: codex,gemini,opencode,claudecode) [env: CCGONEXT_AGENTS]
     #[arg(long, default_value = "codex,gemini,opencode", env = "CCGONEXT_AGENTS")]
     agents: String,
 
-    /// Maximum number of retries when agent fails to start [env: CCGONEXT_MAX_START_RETRIES]
-    #[arg(long, default_value = "3", env = "CCGONEXT_MAX_START_RETRIES")]
-    max_start_retries: u32,
+    /// Default callback policy for enabled agents [env: CCGONEXT_CALLBACK_POLICY]
+    #[arg(long, env = "CCGONEXT_CALLBACK_POLICY", value_enum, default_value_t = CallbackPolicy::AutoApprove)]
+    callback_policy: CallbackPolicy,
 
-    /// Base delay in milliseconds for exponential backoff between retries [env: CCGONEXT_START_RETRY_DELAY]
-    #[arg(long, default_value = "1000", env = "CCGONEXT_START_RETRY_DELAY")]
-    start_retry_delay: u64,
+    /// Callback policy override for Codex [env: CCGONEXT_CODEX_CALLBACK_POLICY]
+    #[arg(long, env = "CCGONEXT_CODEX_CALLBACK_POLICY", value_enum)]
+    codex_callback_policy: Option<CallbackPolicy>,
 
-    /// Log file path (optional, if not set logs only go to stderr) [env: CCGONEXT_LOG_FILE]
+    /// Callback policy override for Gemini [env: CCGONEXT_GEMINI_CALLBACK_POLICY]
+    #[arg(long, env = "CCGONEXT_GEMINI_CALLBACK_POLICY", value_enum)]
+    gemini_callback_policy: Option<CallbackPolicy>,
+
+    /// Callback policy override for OpenCode [env: CCGONEXT_OPENCODE_CALLBACK_POLICY]
+    #[arg(long, env = "CCGONEXT_OPENCODE_CALLBACK_POLICY", value_enum)]
+    opencode_callback_policy: Option<CallbackPolicy>,
+
+    /// Callback policy override for ClaudeCode [env: CCGONEXT_CLAUDECODE_CALLBACK_POLICY]
+    #[arg(long, env = "CCGONEXT_CLAUDECODE_CALLBACK_POLICY", value_enum)]
+    claudecode_callback_policy: Option<CallbackPolicy>,
+
+    /// Idle timeout in seconds before auto-stopping agents [env: CCGONEXT_IDLE_TIMEOUT]
+    #[arg(long, default_value = "900", env = "CCGONEXT_IDLE_TIMEOUT")]
+    idle_timeout: u64,
+
+    /// Log file path (optional) [env: CCGONEXT_LOG_FILE]
     #[arg(long, env = "CCGONEXT_LOG_FILE")]
     log_file: Option<String>,
 
@@ -110,23 +116,16 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing with optional file output
     init_tracing(&cli);
 
     let config = Arc::new(build_config(&cli));
 
     match cli.command {
         Some(Commands::Serve) | None => {
-            run_mcp_server(config, cli.port_retry, cli.windows_enter_delay_ms).await?;
+            run_mcp_server(config, cli.port_retry).await?;
         }
         Some(Commands::Web) => {
-            run_web_server(
-                config,
-                cli.port_retry,
-                cli.open_browser,
-                cli.windows_enter_delay_ms,
-            )
-            .await?;
+            run_web_server(config, cli.port_retry, cli.open_browser).await?;
         }
         Some(Commands::Config) => {
             show_config(&config);
@@ -143,7 +142,6 @@ fn init_tracing(cli: &Cli) {
     let stderr_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
 
     if let Some(log_dir) = &cli.log_dir {
-        // Rotating file appender (daily rotation)
         let file_appender = tracing_appender::rolling::daily(log_dir, "ccgonext.log");
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
@@ -158,10 +156,8 @@ fn init_tracing(cli: &Cli) {
             .with(file_layer)
             .init();
 
-        // Leak the guard to keep it alive for the program lifetime
         std::mem::forget(_guard);
     } else if let Some(log_file) = &cli.log_file {
-        // Single file appender
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -179,7 +175,6 @@ fn init_tracing(cli: &Cli) {
             .with(file_layer)
             .init();
     } else {
-        // Stderr only
         tracing_subscriber::registry()
             .with(env_filter)
             .with(stderr_layer)
@@ -194,33 +189,59 @@ fn build_config(cli: &Cli) -> Config {
         .to_string_lossy()
         .to_string();
 
+    let idle_timeout = Duration::from_secs(cli.idle_timeout);
+
     let mut agents = HashMap::new();
 
     if enabled_agents.contains(&"codex") {
         agents.insert(
             "codex".to_string(),
-            AgentConfig::codex_default().with_command(cli.codex_cmd.clone()),
+            AgentConfig::codex_default()
+                .with_command(cli.codex_cmd.clone())
+                .with_callback_policy(resolve_callback_policy(
+                    cli.codex_callback_policy.clone(),
+                    &cli.callback_policy,
+                ))
+                .with_idle_timeout(idle_timeout),
         );
     }
 
     if enabled_agents.contains(&"gemini") {
         agents.insert(
             "gemini".to_string(),
-            AgentConfig::gemini_default().with_command(cli.gemini_cmd.clone()),
+            AgentConfig::gemini_default()
+                .with_command(cli.gemini_cmd.clone())
+                .with_callback_policy(resolve_callback_policy(
+                    cli.gemini_callback_policy.clone(),
+                    &cli.callback_policy,
+                ))
+                .with_idle_timeout(idle_timeout),
         );
     }
 
     if enabled_agents.contains(&"opencode") {
         agents.insert(
             "opencode".to_string(),
-            AgentConfig::opencode_default().with_command(cli.opencode_cmd.clone()),
+            AgentConfig::opencode_default()
+                .with_command(cli.opencode_cmd.clone())
+                .with_callback_policy(resolve_callback_policy(
+                    cli.opencode_callback_policy.clone(),
+                    &cli.callback_policy,
+                ))
+                .with_idle_timeout(idle_timeout),
         );
     }
 
     if enabled_agents.contains(&"claudecode") {
         agents.insert(
             "claudecode".to_string(),
-            AgentConfig::claudecode_default().with_command(cli.claudecode_cmd.clone()),
+            AgentConfig::claudecode_default()
+                .with_command(cli.claudecode_cmd.clone())
+                .with_callback_policy(resolve_callback_policy(
+                    cli.claudecode_callback_policy.clone(),
+                    &cli.callback_policy,
+                ))
+                .with_idle_timeout(idle_timeout),
         );
     }
 
@@ -232,27 +253,17 @@ fn build_config(cli: &Cli) -> Config {
         agents,
         timeouts: TimeoutConfig {
             default: cli.timeout,
-            max_start_retries: cli.max_start_retries,
-            start_retry_delay_ms: cli.start_retry_delay,
-            ..TimeoutConfig::default()
         },
         web: WebConfig {
             auth_token: cli.auth_token.clone(),
-            input_enabled: cli.input_enabled,
-            output_buffer_size: cli.buffer_size,
             project_root,
         },
     }
 }
 
-async fn run_mcp_server(
-    config: Arc<Config>,
-    port_retry: u16,
-    windows_enter_delay_ms: u64,
-) -> anyhow::Result<()> {
-    let session_manager = create_session_manager(&config, windows_enter_delay_ms).await?;
+async fn run_mcp_server(config: Arc<Config>, port_retry: u16) -> anyhow::Result<()> {
+    let session_manager = create_session_manager(&config);
 
-    // Set up shutdown signal handler
     let shutdown_manager = session_manager.clone();
     let shutdown_handle = tokio::spawn(async move {
         wait_for_shutdown_signal().await;
@@ -261,7 +272,6 @@ async fn run_mcp_server(
         tracing::info!("Cleanup complete");
     });
 
-    // Start web server in background
     let web_config = config.clone();
     let web_session_manager = session_manager.clone();
     tokio::spawn(async move {
@@ -275,11 +285,9 @@ async fn run_mcp_server(
         }
     });
 
-    // Run MCP server on stdio
     let mcp_server = McpServer::new(session_manager.clone(), config);
     let result = mcp_server.run_stdio().await;
 
-    // Ensure cleanup happens even if MCP server exits normally
     session_manager.shutdown_all().await;
     shutdown_handle.abort();
 
@@ -290,11 +298,9 @@ async fn run_web_server(
     config: Arc<Config>,
     port_retry: u16,
     open_browser: bool,
-    windows_enter_delay_ms: u64,
 ) -> anyhow::Result<()> {
-    let session_manager = create_session_manager(&config, windows_enter_delay_ms).await?;
+    let session_manager = create_session_manager(&config);
 
-    // Set up shutdown signal handler
     let shutdown_manager = session_manager.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
@@ -336,56 +342,19 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-async fn create_session_manager(
-    config: &Config,
-    windows_enter_delay_ms: u64,
-) -> anyhow::Result<Arc<SessionManager>> {
-    let pty_manager = Arc::new(PtyManager::new_with_windows_enter_delay_ms(
-        config.web.output_buffer_size,
-        windows_enter_delay_ms,
-    ));
-    let session_manager = Arc::new(SessionManager::new(pty_manager));
-
-    let working_dir = std::env::current_dir()?;
+fn create_session_manager(config: &Config) -> Arc<SessionManager> {
+    let event_log = Arc::new(EventLog::new(10_000));
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     tracing::info!("Working directory for agents: {:?}", working_dir);
 
-    // Register configured agents
-    for (name, agent_config) in &config.agents {
-        let adapter = agent::create_agent(name, agent_config);
+    SessionManager::new(config.agents.clone(), event_log)
+}
 
-        // Create config with working_dir for LogProvider
-        let mut log_config = std::collections::HashMap::new();
-        log_config.insert(
-            "working_dir".to_string(),
-            working_dir.to_string_lossy().to_string(),
-        );
-
-        let log_provider: Arc<dyn log_provider::LogProvider> = Arc::from(
-            log_provider::create_log_provider(&agent_config.log_provider, Some(&log_config)),
-        );
-
-        let session = AgentSession::new(
-            name.clone(),
-            Arc::from(adapter),
-            log_provider,
-            working_dir.clone(),
-            config.timeouts.clone(),
-        );
-
-        session_manager.register(session).await;
-    }
-
-    // Pre-start all agents in background (non-blocking)
-    // Use tokio::task::yield_now to ensure the spawn gets a chance to start
-    let sm = session_manager.clone();
-    tokio::spawn(async move {
-        sm.start_all().await;
-    });
-
-    // Yield to allow the spawned task to start executing
-    tokio::task::yield_now().await;
-
-    Ok(session_manager)
+fn resolve_callback_policy(
+    override_policy: Option<CallbackPolicy>,
+    default_policy: &CallbackPolicy,
+) -> CallbackPolicy {
+    override_policy.unwrap_or_else(|| default_policy.clone())
 }
 
 fn show_config(config: &Config) {
@@ -397,7 +366,6 @@ fn show_config(config: &Config) {
     println!("  Port: {}", config.server.port);
     println!();
     println!("Web:");
-    println!("  Input enabled: {}", config.web.input_enabled);
     println!(
         "  Auth token: {}",
         if config.web.auth_token.is_some() {
@@ -406,19 +374,83 @@ fn show_config(config: &Config) {
             "none"
         }
     );
-    println!("  Buffer size: {} bytes", config.web.output_buffer_size);
     println!();
     println!("Timeouts:");
     println!("  Default: {}s", config.timeouts.default);
-    println!("  Startup: {}s", config.timeouts.startup);
-    println!("  Max start retries: {}", config.timeouts.max_start_retries);
-    println!(
-        "  Start retry delay: {}ms",
-        config.timeouts.start_retry_delay_ms
-    );
     println!();
     println!("Agents:");
     for (name, agent_config) in &config.agents {
-        println!("  - {} (command: {})", name, agent_config.command);
+        println!(
+            "  - {} (command: {} {:?}, callback_policy: {:?}, idle_timeout: {}s)",
+            name,
+            agent_config.acp_command,
+            agent_config.acp_args,
+            agent_config.callback_policy,
+            agent_config.idle_timeout.as_secs()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse_cli(args: &[&str]) -> Cli {
+        let argv = std::iter::once("ccgonext")
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>();
+        Cli::parse_from(argv)
+    }
+
+    #[test]
+    fn test_build_config_uses_auto_approve_by_default() {
+        let cli = parse_cli(&[]);
+        let config = build_config(&cli);
+        assert_eq!(
+            config.agents.get("codex").unwrap().callback_policy,
+            CallbackPolicy::AutoApprove
+        );
+        assert_eq!(
+            config.agents.get("gemini").unwrap().callback_policy,
+            CallbackPolicy::AutoApprove
+        );
+        assert_eq!(
+            config.agents.get("opencode").unwrap().callback_policy,
+            CallbackPolicy::AutoApprove
+        );
+    }
+
+    #[test]
+    fn test_build_config_applies_global_callback_policy() {
+        let cli = parse_cli(&["--callback-policy", "deny-all"]);
+        let config = build_config(&cli);
+        assert_eq!(
+            config.agents.get("codex").unwrap().callback_policy,
+            CallbackPolicy::DenyAll
+        );
+        assert_eq!(
+            config.agents.get("gemini").unwrap().callback_policy,
+            CallbackPolicy::DenyAll
+        );
+    }
+
+    #[test]
+    fn test_build_config_agent_callback_policy_override_wins() {
+        let cli = parse_cli(&[
+            "--callback-policy",
+            "deny-all",
+            "--codex-callback-policy",
+            "read-only",
+        ]);
+        let config = build_config(&cli);
+        assert_eq!(
+            config.agents.get("codex").unwrap().callback_policy,
+            CallbackPolicy::ReadOnly
+        );
+        assert_eq!(
+            config.agents.get("gemini").unwrap().callback_policy,
+            CallbackPolicy::DenyAll
+        );
     }
 }

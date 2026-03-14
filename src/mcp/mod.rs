@@ -8,8 +8,6 @@ pub use tools::*;
 
 use crate::config::Config;
 use crate::session::SessionManager;
-use crossterm::terminal;
-use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
@@ -34,14 +32,6 @@ pub struct McpServer {
     config: Arc<Config>,
 }
 
-struct RawModeGuard;
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
-}
-
 impl McpServer {
     pub fn new(session_manager: Arc<SessionManager>, config: Arc<Config>) -> Self {
         Self {
@@ -51,18 +41,6 @@ impl McpServer {
     }
 
     pub async fn run_stdio(&self) -> anyhow::Result<()> {
-        let _raw_mode_guard = if std::io::stdin().is_terminal() {
-            match terminal::enable_raw_mode() {
-                Ok(()) => Some(RawModeGuard),
-                Err(e) => {
-                    tracing::warn!("Failed to enable raw mode on stdin: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let stdin = tokio::io::stdin();
         let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
         let mut reader = BufReader::new(stdin);

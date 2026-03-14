@@ -1,5 +1,3 @@
-//! Web service layer
-
 mod auth;
 mod handlers;
 mod static_files;
@@ -52,7 +50,6 @@ impl WebServer {
         let base_port = config.server.port;
         let listener = bind_listener(host, base_port, options.port_retry).await?;
 
-        // Port may differ if base_port was 0 (ephemeral) or due to retry.
         let server_port = listener.local_addr()?.port();
 
         let ui_addr = ui_addr_for_bind(host, server_port);
@@ -66,7 +63,6 @@ impl WebServer {
             }
         }
 
-        // Build CORS layer
         let cors = CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
@@ -78,11 +74,15 @@ impl WebServer {
             server_port,
         };
 
-        // Build router with auth middleware
         let app = Router::new()
             .route("/api/status", get(api_get_status))
-            .route("/api/restart/:agent", post(api_restart_agent))
-            .route("/ws/:agent", get(ws_handler))
+            .route("/api/sessions", get(api_list_sessions))
+            .route("/api/prompt/{session_id}", post(api_prompt_session))
+            .route(
+                "/api/permission/{session_id}",
+                post(api_permission_response),
+            )
+            .route("/ws", get(ws_handler))
             .fallback(static_handler)
             .layer(middleware::from_fn_with_state(
                 state.clone(),

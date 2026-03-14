@@ -1,12 +1,7 @@
-//! CCGO - ClaudeCode-Codex-Gemini-OpenCode MCP Server
-//!
-//! A multi-AI collaboration bridge based on MCP protocol.
-
-pub mod agent;
+pub mod acp;
 pub mod config;
-pub mod log_provider;
+pub mod events;
 pub mod mcp;
-pub mod pty;
 pub mod session;
 pub mod state;
 pub mod web;

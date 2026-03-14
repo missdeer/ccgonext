@@ -1,204 +1,428 @@
-//! Integration tests for session layer
-//!
-//! These tests validate the session management functionality including
-//! ClaudeCode PTY-based reply detection.
-
-use async_trait::async_trait;
-use ccgonext::agent::{ClaudeCodeAgent, GenericAgent};
-use ccgonext::config::{AgentConfig, TimeoutConfig};
-use ccgonext::log_provider::{HistoryEntry, LockedSession, LogEntry, LogProvider};
-use ccgonext::pty::PtyManager;
-use ccgonext::session::AgentSession;
-use std::path::PathBuf;
+use ccgonext::config::AgentConfig;
+use ccgonext::events::EventLog;
+use ccgonext::mcp::{execute_tool, AskAgentsResponse};
+use ccgonext::session::SessionManager;
+use ccgonext::state::{ProcessState, TurnState};
+use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::timeout;
+use std::time::{Duration, Instant};
 
-// Mock LogProvider for testing
-struct MockLogProvider;
+#[tokio::test]
+async fn test_session_manager_get_or_create() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
 
-#[async_trait]
-impl LogProvider for MockLogProvider {
-    async fn get_latest_reply(&self, _since_offset: u64) -> Option<LogEntry> {
-        None
-    }
+    let mgr = SessionManager::new(configs, event_log);
 
-    async fn get_history(&self, _session_id: Option<&str>, _count: usize) -> Vec<HistoryEntry> {
-        vec![]
-    }
+    let cwd = std::path::Path::new("/tmp");
+    let session = mgr.get_or_create("codex", cwd).await;
+    assert!(session.is_ok());
 
-    async fn get_current_offset(&self) -> u64 {
-        0
-    }
-
-    fn get_inode(&self) -> Option<u64> {
-        None
-    }
-
-    fn get_watch_path(&self) -> Option<std::path::PathBuf> {
-        None
-    }
-
-    async fn lock_session(&self) -> Option<LockedSession> {
-        None
-    }
-
-    async fn unlock_session(&self) {}
+    let s1 = session.unwrap();
+    let s2 = mgr.get_or_create("codex", cwd).await.unwrap();
+    assert_eq!(s1.id, s2.id);
 }
 
 #[tokio::test]
-#[ignore] // Requires actual claude binary installed
-async fn test_claudecode_pty_reply_detection() {
-    // Create PTY manager
-    let pty_manager = Arc::new(PtyManager::new(100 * 1024 * 1024));
+async fn test_session_manager_unknown_agent() {
+    let configs = HashMap::new();
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
 
-    // Create ClaudeCodeAgent
-    let agent = Arc::new(ClaudeCodeAgent::new());
-
-    // Create mock log provider
-    let log_provider = Arc::new(MockLogProvider);
-
-    // Create session
-    let session = AgentSession::new(
-        "test-claudecode".to_string(),
-        agent.clone(),
-        log_provider,
-        PathBuf::from("/tmp"),
-        TimeoutConfig::default(),
-    );
-
-    let session_arc = Arc::new(session);
-
-    // Start agent (this will create PTY)
-    let start_result = session_arc.start(pty_manager.as_ref()).await;
-    assert!(
-        start_result.is_ok(),
-        "Failed to start session: {:?}",
-        start_result
-    );
-
-    // Wait longer for agent to be ready (claude might take time to start)
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Verify state transitions from Starting to Idle (or remains Starting if claude not found)
-    let state = session_arc.get_state().await;
-    if matches!(state, ccgonext::state::AgentState::Idle) {
-        // Send a request
-        let request_future = session_arc.ask(
-            "test message".to_string(),
-            Some(Duration::from_secs(10)),
-            pty_manager.as_ref(),
-            None,
-        );
-
-        // Wait for response with timeout
-        let response = timeout(Duration::from_secs(15), request_future).await;
-
-        // Verify response doesn't timeout (indicating PTY detection works)
-        assert!(
-            response.is_ok(),
-            "Request timed out - ClaudeCode PTY detection may not be working"
-        );
-    }
-
-    // Cleanup
-    let _ = session_arc.stop(true, Some(pty_manager.as_ref())).await;
+    let result = mgr
+        .get_or_create("unknown", std::path::Path::new("/tmp"))
+        .await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
-async fn test_claudecode_type_detection() {
-    // Create agents
-    let claudecode = Arc::new(ClaudeCodeAgent::new());
+async fn test_session_manager_different_cwd_creates_new_session() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
 
-    // Create a test AgentConfig for codex
-    let codex_config = AgentConfig {
-        command: "codex".to_string(),
-        args: vec![],
-        log_provider: "codex".to_string(),
-        ready_pattern: r"^(>|codex>)".to_string(),
-        error_patterns: vec!["Error:".to_string(), "Traceback".to_string()],
-        supports_cwd: true,
-        sentinel_template: "# MSG_ID:{id}\n{message}".to_string(),
-        sentinel_regex: r"# MSG_ID:([a-f0-9-]+)".to_string(),
-        done_template: "CCGO_DONE: {id}".to_string(),
-        done_regex: r"(?m)CCGO_DONE:\s*([a-f0-9-]+)".to_string(),
-        use_stability_heuristic: true,
-    };
-    let codex = Arc::new(GenericAgent::new("codex".to_string(), &codex_config));
+    let mgr = SessionManager::new(configs, event_log);
 
-    // Create mock log provider
-    let log_provider = Arc::new(MockLogProvider);
+    let s1 = mgr
+        .get_or_create("codex", std::path::Path::new("/tmp/a"))
+        .await
+        .unwrap();
+    let s2 = mgr
+        .get_or_create("codex", std::path::Path::new("/tmp/b"))
+        .await
+        .unwrap();
 
-    // Create sessions
-    let cc_session = AgentSession::new(
-        "test-cc".to_string(),
-        claudecode,
-        log_provider.clone(),
-        PathBuf::from("/tmp"),
-        TimeoutConfig::default(),
-    );
-
-    let codex_session = AgentSession::new(
-        "test-codex".to_string(),
-        codex,
-        log_provider,
-        PathBuf::from("/tmp"),
-        TimeoutConfig::default(),
-    );
-
-    // Verify type detection
-    assert!(
-        cc_session.adapter.as_any().is::<ClaudeCodeAgent>(),
-        "ClaudeCodeAgent type detection failed"
-    );
-
-    assert!(
-        !codex_session.adapter.as_any().is::<ClaudeCodeAgent>(),
-        "Codex should not be detected as ClaudeCodeAgent"
-    );
+    assert_ne!(s1.id, s2.id);
 }
 
 #[tokio::test]
-#[ignore] // Requires actual claude binary installed
-async fn test_claudecode_pty_offset_tracking() {
-    // Create PTY manager
-    let pty_manager = Arc::new(PtyManager::new(100 * 1024 * 1024));
+async fn test_session_manager_has_agent() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
 
-    // Create ClaudeCodeAgent
-    let agent = Arc::new(ClaudeCodeAgent::new());
+    let mgr = SessionManager::new(configs, event_log);
+    assert!(mgr.has_agent("codex"));
+    assert!(!mgr.has_agent("unknown"));
+}
 
-    // Create mock log provider
-    let log_provider = Arc::new(MockLogProvider);
+#[tokio::test]
+async fn test_session_manager_get_or_create_is_atomic() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let cwd = Arc::new(std::path::PathBuf::from("/tmp"));
 
-    // Create session
-    let session = AgentSession::new(
-        "test-offset".to_string(),
-        agent.clone(),
-        log_provider,
-        PathBuf::from("/tmp"),
-        TimeoutConfig::default(),
-    );
-
-    let session_arc = Arc::new(session);
-
-    // Start agent
-    let start_result = session_arc.start(pty_manager.as_ref()).await;
-    assert!(start_result.is_ok());
-
-    // Wait for ready
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Get PTY handle and verify offset is valid
-    let pty_guard = session_arc.pty.read().await;
-    if let Some(pty) = pty_guard.as_ref() {
-        let _offset = pty.get_current_offset().await;
-        // Offset is u64, always non-negative, just verify we can get it
-    } else {
-        panic!("PTY should be available after start");
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let mgr = mgr.clone();
+        let cwd = cwd.clone();
+        tasks.push(tokio::spawn(async move {
+            mgr.get_or_create("codex", &cwd).await.unwrap().id.clone()
+        }));
     }
 
-    drop(pty_guard);
+    let mut ids = Vec::new();
+    for task in tasks {
+        ids.push(task.await.unwrap());
+    }
 
-    // Cleanup
-    let _ = session_arc.stop(true, Some(pty_manager.as_ref())).await;
+    let first = ids.first().unwrap().clone();
+    assert!(ids.into_iter().all(|id| id == first));
+}
+
+#[tokio::test]
+async fn test_shutdown_all_clears_session_indexes() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    let session = mgr
+        .get_or_create("codex", std::path::Path::new("/tmp"))
+        .await
+        .unwrap();
+
+    mgr.shutdown_all().await;
+
+    assert!(mgr.get_by_id(&session.id).await.is_none());
+    assert!(mgr.list_sessions().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_session_initial_state() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    let session = mgr
+        .get_or_create("codex", std::path::Path::new("/tmp"))
+        .await
+        .unwrap();
+
+    assert_eq!(session.process_state().await, ProcessState::Stopped);
+    assert_eq!(session.turn_state().await, TurnState::Idle);
+}
+
+#[tokio::test]
+async fn test_session_manager_get_by_id() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    let session = mgr
+        .get_or_create("codex", std::path::Path::new("/tmp"))
+        .await
+        .unwrap();
+
+    let found = mgr.get_by_id(&session.id).await;
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().id, session.id);
+
+    assert!(mgr.get_by_id("nonexistent-id").await.is_none());
+}
+
+#[tokio::test]
+async fn test_session_manager_list_sessions() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    configs.insert("gemini".to_string(), AgentConfig::gemini_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    assert!(mgr.list_sessions().await.is_empty());
+
+    mgr.get_or_create("codex", std::path::Path::new("/a"))
+        .await
+        .unwrap();
+    mgr.get_or_create("gemini", std::path::Path::new("/b"))
+        .await
+        .unwrap();
+
+    let sessions = mgr.list_sessions().await;
+    assert_eq!(sessions.len(), 2);
+
+    let agents: Vec<&str> = sessions.iter().map(|s| s.agent.as_str()).collect();
+    assert!(agents.contains(&"codex"));
+    assert!(agents.contains(&"gemini"));
+}
+
+#[tokio::test]
+async fn test_session_manager_get_all_status() {
+    let mut configs = HashMap::new();
+    configs.insert("codex".to_string(), AgentConfig::codex_default());
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    mgr.get_or_create("codex", std::path::Path::new("/tmp"))
+        .await
+        .unwrap();
+
+    let statuses = mgr.get_all_status().await;
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].0, "codex");
+    assert_eq!(statuses[0].1, ProcessState::Stopped);
+    assert_eq!(statuses[0].2, TurnState::Idle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_session_timeout_returns_promptly() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp.ps1");
+    std::fs::write(&script_path, fake_acp_timeout_script()).unwrap();
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
+
+    let started = Instant::now();
+    let result = session
+        .ask("slow request".to_string(), Some(Duration::from_secs(1)))
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().to_string(), "Request timed out");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "timeout returned too late: {:?}",
+        elapsed
+    );
+    assert_eq!(session.process_state().await, ProcessState::Dead);
+    assert_eq!(session.turn_state().await, TurnState::Idle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_session_restarts_cleanly_after_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-restart.ps1");
+    std::fs::write(&script_path, fake_acp_restart_script()).unwrap();
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
+
+    let first = session
+        .ask("first".to_string(), Some(Duration::from_secs(1)))
+        .await;
+    assert!(first.is_err());
+    assert_eq!(first.unwrap_err().to_string(), "Request timed out");
+    assert_eq!(session.process_state().await, ProcessState::Dead);
+
+    let second = session
+        .ask("second".to_string(), Some(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    assert_eq!(second, "");
+    assert_eq!(session.process_state().await, ProcessState::Running);
+    assert_eq!(session.turn_state().await, TurnState::Idle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_ask_agents_reports_timeout_in_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-timeout-mcp.ps1");
+    std::fs::write(&script_path, fake_acp_timeout_script()).unwrap();
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+
+    let started = Instant::now();
+    let response_json = execute_tool(
+        "ask_agents",
+        json!({
+            "requests": [{"agent": "codex", "message": "slow"}],
+            "timeout": 1,
+            "project_root_path": temp.path().to_string_lossy().to_string(),
+        }),
+        &mgr,
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    let response: AskAgentsResponse = serde_json::from_str(&response_json).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(!response.results[0].success);
+    assert_eq!(
+        response.results[0].error.as_deref(),
+        Some("Request timed out")
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "MCP timeout returned too late: {:?}",
+        elapsed
+    );
+}
+
+#[cfg(windows)]
+fn fake_acp_timeout_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.method -eq 'initialize') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/new') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                sessionId = 'fake-session'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/prompt') {
+        Start-Sleep -Seconds 10
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                stopReason = 'end_turn'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+}
+"#
+}
+
+#[cfg(windows)]
+fn fake_acp_restart_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+$counterPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'prompt-counter.txt'
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.method -eq 'initialize') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/new') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                sessionId = 'fake-session'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/prompt') {
+        $count = 0
+        if (Test-Path $counterPath) {
+            $count = [int](Get-Content $counterPath -Raw)
+        }
+        Set-Content -Path $counterPath -Value ($count + 1)
+        if ($count -eq 0) {
+            Start-Sleep -Seconds 10
+        }
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                stopReason = 'end_turn'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+}
+"#
 }

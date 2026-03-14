@@ -13,12 +13,9 @@ categories = ["command-line-utilities", "development-tools"]
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
 
-# MCP protocol
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# PTY management
-portable-pty = "0.8"
 
 # Web server
 axum = { version = "0.7", features = ["ws"] }
@@ -29,7 +26,6 @@ rust-embed = { version = "8.5", features = ["axum"] }
 mime_guess = "2.0"
 
 # WebSocket
-tokio-tungstenite = "0.24"
 futures-util = "0.3"
 
 # Logging
@@ -40,20 +36,15 @@ tracing-appender = "0.2"
 # Utilities
 thiserror = "2.0"
 anyhow = "1.0"
-async-trait = "0.1"
 uuid = { version = "1.11", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-regex = "1.11"
-dirs = "5.0"
-notify = "7.0"
-parking_lot = "0.12"
-bytes = "1.9"
 futures = "0.3"
-crossterm = "0.27"
-
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
+
+# ACP protocol types
+agent-client-protocol-schema = { version = "0.11", features = ["unstable_cancel_request"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -1,5 +1,3 @@
-//! MCP Tool implementations
-
 use super::ToolDefinition;
 use crate::session::SessionManager;
 use futures::FutureExt;
@@ -151,12 +149,9 @@ async fn execute_ask_agents(
 
     let timeout_duration = Duration::from_secs(args.timeout);
     let request_count = args.requests.len();
-
-    // Pre-collect agent names for error fallback
     let agent_names: Vec<String> = args.requests.iter().map(|r| r.agent.clone()).collect();
 
     let mut join_set = JoinSet::new();
-    // Map task ID to request index for JoinError attribution
     let mut task_id_to_idx: HashMap<tokio::task::Id, usize> = HashMap::new();
 
     for (idx, req) in args.requests.into_iter().enumerate() {
@@ -167,8 +162,6 @@ async fn execute_ask_agents(
 
         let handle = join_set.spawn(async move {
             let result = AssertUnwindSafe(async {
-                // Pass timeout to ask_single_agent to ensure ReplyDetection uses it
-                // This prevents ReplyDetection from continuing beyond the MCP timeout
                 ask_single_agent(&agent, &message, Some(timeout_duration), &root_path, &sm).await
             })
             .catch_unwind()
@@ -216,7 +209,6 @@ async fn execute_ask_agents(
                 results[idx] = Some(agent_result);
             }
             Err(join_error) => {
-                // JoinError - use task ID from error to find the correct index
                 let task_id = join_error.id();
                 if let Some(&idx) = task_id_to_idx.get(&task_id) {
                     results[idx] = Some(AgentResult {
@@ -225,26 +217,20 @@ async fn execute_ask_agents(
                         response: None,
                         error: Some(format!("task cancelled: {}", join_error)),
                     });
-                } else {
-                    tracing::error!("Unknown task ID in JoinError: {:?}", task_id);
                 }
             }
         }
     }
 
-    // Convert to final results - use pre-collected agent names for any remaining None slots
     let results: Vec<AgentResult> = results
         .into_iter()
         .enumerate()
         .map(|(idx, opt)| {
-            opt.unwrap_or_else(|| {
-                tracing::error!("Result slot {} was not filled", idx);
-                AgentResult {
-                    agent: agent_names[idx].clone(),
-                    success: false,
-                    response: None,
-                    error: Some("internal error: result not collected".to_string()),
-                }
+            opt.unwrap_or_else(|| AgentResult {
+                agent: agent_names[idx].clone(),
+                success: false,
+                response: None,
+                error: Some("internal error: result not collected".to_string()),
             })
         })
         .collect();
@@ -260,20 +246,10 @@ async fn ask_single_agent(
     project_root_path: &str,
     session_manager: &Arc<SessionManager>,
 ) -> Result<String, anyhow::Error> {
-    let session = session_manager
-        .get(agent_name)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Agent not found: {}", agent_name))?;
+    let cwd = std::path::Path::new(project_root_path);
 
-    let pty_manager = session_manager.pty_manager();
-    let response = session
-        .ask(
-            message.to_string(),
-            timeout,
-            pty_manager,
-            Some(project_root_path.to_string()),
-        )
-        .await?;
+    let session = session_manager.get_or_create(agent_name, cwd).await?;
+    let response = session.ask(message.to_string(), timeout).await?;
 
     Ok(response)
 }
@@ -306,7 +282,6 @@ mod tests {
 
         let args: AskAgentsArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.timeout, DEFAULT_TIMEOUT);
-        assert!(args.project_root_path.is_none());
     }
 
     #[test]

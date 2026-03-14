@@ -3,672 +3,693 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CCGONEXT - AI Bridge Console</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <title>CCGONEXT - Activity Console</title>
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Courier New', Courier, monospace;
-            background: #ffffff;
-            color: #000000;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+            background: #0d1117; color: #c9d1d9;
+            height: 100vh; overflow: hidden;
+            display: flex; flex-direction: column;
         }
         .header {
-            background: #ffffff;
-            padding: 0.75rem 1.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid #000000;
-            flex-shrink: 0;
+            background: #161b22; padding: 0.6rem 1.2rem;
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid #30363d; flex-shrink: 0;
         }
-        .header h1 {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 1.25rem;
-            color: #000000;
-            font-weight: 700;
-            letter-spacing: 0.05em;
+        .header h1 { font-size: 0.9rem; color: #58a6ff; font-weight: 600; }
+        .header .project-root { font-size: 0.75rem; color: #8b949e; }
+        .main { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+        .sidebar {
+            width: 220px; background: #161b22; border-right: 1px solid #30363d;
+            overflow: hidden; flex-shrink: 0;
         }
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
+        .sidebar h2 {
+            font-size: 0.7rem; color: #8b949e; padding: 0.8rem 1rem 0.4rem;
+            text-transform: uppercase; letter-spacing: 0.5px;
         }
-        .nav-links {
-            display: flex;
-            gap: 0.5rem;
+        .session-item {
+            padding: 0.5rem 1rem; cursor: pointer; border-left: 3px solid transparent;
+            font-size: 0.8rem; transition: background 0.15s;
         }
-        .nav-link {
-            font-family: 'Courier New', Courier, monospace;
-            color: #000000;
-            text-decoration: none;
-            padding: 0.4rem 0.8rem;
-            border: 1px solid transparent;
-            font-size: 0.85rem;
-            transition: all 0.2s;
-            letter-spacing: 0.03em;
+        .session-item:hover { background: #1c2128; }
+        .session-item.active { border-left-color: #58a6ff; background: #1c2128; }
+        .session-item .agent-name { font-weight: 600; color: #c9d1d9; }
+        .session-item .session-meta { font-size: 0.65rem; color: #8b949e; margin-top: 2px; }
+        .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; }
+        .dot.running { background: #3fb950; }
+        .dot.stopped { background: #8b949e; }
+        .dot.starting { background: #d29922; }
+        .dot.dead { background: #f85149; }
+        .content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+        .events {
+            flex: 1; min-height: 0; overflow-y: auto; padding: 1rem;
+            display: flex; flex-direction: column; gap: 0.3rem;
         }
-        .nav-link:hover {
-            border-bottom: 1px solid #000000;
+        .event {
+            padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.8rem;
+            line-height: 1.4; word-break: break-word;
         }
-        .nav-link.active {
-            border-bottom: 2px solid #000000;
-            font-weight: 500;
+        .event.turn {
+            background: #11161d;
+            border: 1px solid #27303a;
+            padding: 0.75rem 0.9rem;
         }
-        .status-badge {
-            font-family: 'Courier New', Courier, monospace;
-            background: #ffffff;
-            border: 1px solid #000000;
-            padding: 0.4rem 0.8rem;
-            border-radius: 0;
-            font-size: 0.85rem;
-            color: #000000;
-            letter-spacing: 0.03em;
+        .turn-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 0.75rem; margin-bottom: 0.55rem;
         }
-        .project-root {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 0.8rem;
-            color: #666;
-            padding: 0.3rem 0.6rem;
-            flex: 1;
-            text-align: center;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            display: none;
+        .turn-title {
+            display: flex; align-items: center; gap: 0.5rem;
+            font-size: 0.75rem; color: #8b949e;
         }
-
-        /* Grid mode (overview) */
-        .container-grid {
-            flex: 1;
-            padding: 1rem;
-            display: grid;
-            gap: 1rem;
-            width: 100%;
-            grid-auto-rows: 1fr;
+        .turn-badge {
+            display: inline-block; padding: 1px 6px; border-radius: 999px;
+            font-size: 0.65rem; background: #1c2128; color: #58a6ff; font-weight: 600;
         }
-        /* Dynamic grid layout based on agent count */
-        .container-grid[data-agent-count="1"] {
-            grid-template-columns: 1fr;
-            grid-template-rows: 1fr;
+        .turn-badge.complete { color: #3fb950; }
+        .turn-body { display: flex; flex-direction: column; gap: 0.5rem; }
+        .turn-entry {
+            padding-left: 0.7rem; border-left: 2px solid #27303a;
         }
-        .container-grid[data-agent-count="2"] {
-            grid-template-columns: repeat(2, 1fr);
-            grid-template-rows: 1fr;
-        }
-        .container-grid[data-agent-count="3"] {
-            grid-template-columns: repeat(3, 1fr);
-            grid-template-rows: 1fr;
-        }
-        .container-grid[data-agent-count="4"] {
-            grid-template-columns: repeat(2, 1fr);
-            grid-template-rows: repeat(2, 1fr);
-        }
-        .container-grid[data-agent-count="5"],
-        .container-grid[data-agent-count="6"] {
-            grid-template-columns: repeat(3, 1fr);
-            grid-template-rows: repeat(2, 1fr);
-        }
-        .container-grid:not([data-agent-count="1"]):not([data-agent-count="2"]):not([data-agent-count="3"]):not([data-agent-count="4"]):not([data-agent-count="5"]):not([data-agent-count="6"]) {
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-        }
-        .agent-panel {
-            background: #ffffff;
-            border-radius: 0;
-            overflow: hidden;
-            border: 1px solid #000000;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-        }
-        .agent-header {
-            padding: 0.5rem 1rem;
-            background: #ffffff;
-            border-bottom: 1px solid #000000;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-shrink: 0;
-        }
-        .agent-name {
-            font-family: 'Courier New', Courier, monospace;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-        }
-        .agent-icon {
-            font-size: 1.1rem;
-        }
-        .agent-status {
-            font-family: 'Courier New', Courier, monospace;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.8rem;
-            letter-spacing: 0.03em;
-        }
-        .restart-btn {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 0.7rem;
-            padding: 0.2rem 0.5rem;
-            border: 1px solid #000;
-            background: #fff;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .restart-btn:hover {
-            background: #000;
-            color: #fff;
-        }
-        .restart-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #cccccc;
-        }
-        .status-dot.running { background: #22c55e; }
-        .status-dot.stopped { background: #cccccc; }
-        .status-dot.busy { background: #eab308; }
-        .status-dot.error { background: #ef4444; }
-        .input-badge {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 0.7rem;
-            padding: 0.2rem 0.4rem;
-            border: 1px solid;
-            margin-left: 0.5rem;
-        }
-        .input-badge.enabled {
-            color: #22c55e;
-            border-color: #22c55e;
-        }
-        .input-badge.disabled {
-            color: #888;
-            border-color: #888;
-        }
-        .terminal-wrapper {
-            flex: 1;
-            position: relative;
-            min-height: 0;
-            overflow: hidden;
-        }
-        .terminal-container {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            padding: 0.25rem;
-            background: #1a1a2e;
-            box-sizing: border-box;
-        }
-        .terminal-overlay {
-            position: absolute;
-            bottom: 0.5rem;
-            right: 0.5rem;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0.4rem 0.6rem;
-            background: rgba(0, 0, 0, 0.7);
+        .turn-entry.message { border-left-color: #58a6ff; color: #c9d1d9; white-space: pre-wrap; }
+        .turn-entry.thought {
+            border-left-color: #6e7681;
+            color: #8b949e;
+            background: #12171d;
+            padding: 0.45rem 0.7rem;
             border-radius: 4px;
-            transition: background 0.2s, transform 0.2s;
-            z-index: 10;
         }
-        .terminal-overlay:hover {
-            background: rgba(233, 69, 96, 0.9);
-            transform: scale(1.05);
+        .turn-thought-toggle {
+            cursor: pointer;
+            list-style: none;
+            color: #8b949e;
+            font-style: normal;
+            user-select: none;
         }
-        .terminal-overlay .click-hint {
-            font-size: 0.75rem;
-            color: #ccc;
-            white-space: nowrap;
+        .turn-thought-toggle::-webkit-details-marker { display: none; }
+        .turn-thought-toggle::before {
+            content: '▶';
+            display: inline-block;
+            margin-right: 0.45rem;
+            color: #6e7681;
+            transition: transform 0.15s ease;
         }
-        .terminal-overlay:hover .click-hint {
-            color: #fff;
+        .turn-entry.thought[open] .turn-thought-toggle::before {
+            transform: rotate(90deg);
         }
-
-        /* Fullscreen mode (single agent) */
-        .container-full {
-            flex: 1;
+        .turn-thought-label {
+            font-size: 0.72rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+        .turn-thought-body {
+            margin-top: 0.45rem;
+            white-space: pre-wrap;
+            font-style: italic;
+        }
+        .turn-entry.tool {
+            border-left-color: #d29922;
+            background: #151b23;
+            padding: 0.45rem 0.7rem;
+            border-radius: 4px;
+        }
+        .turn-entry.tool.completed { border-left-color: #3fb950; }
+        .turn-entry.plan {
+            border-left-color: #58a6ff;
+            background: #151b23;
+            padding: 0.45rem 0.7rem;
+            border-radius: 4px;
+        }
+        .turn-disclosure {
+            cursor: pointer;
+            list-style: none;
+            user-select: none;
+        }
+        .turn-disclosure::-webkit-details-marker { display: none; }
+        .turn-disclosure::before {
+            content: '▶';
+            display: inline-block;
+            margin-right: 0.45rem;
+            color: #6e7681;
+            transition: transform 0.15s ease;
+        }
+        details[open] > .turn-disclosure::before {
+            transform: rotate(90deg);
+        }
+        .turn-detail-body {
+            margin-top: 0.45rem;
+        }
+        .turn-detail-body small {
+            display: block;
+            white-space: pre-wrap;
+        }
+        .turn-plan-list {
             display: flex;
             flex-direction: column;
-            padding: 0.5rem;
+            gap: 0.2rem;
         }
-        .container-full .agent-panel {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
+        .turn-entry.permission {
+            border-left-color: #d29922;
+            background: #2d1b00;
+            padding: 0.55rem 0.7rem;
+            border-radius: 4px;
         }
-        .container-full .terminal-wrapper {
-            flex: 1;
-            min-height: 0;
+        .turn-entry.permission.resolved {
+            border-left-color: #3fb950;
+            background: #132018;
         }
-
-        .hidden { display: none !important; }
-
-        @media (max-width: 900px) {
-            .container-grid {
-                grid-template-columns: 1fr;
-            }
+        .event.message { color: #c9d1d9; white-space: pre-wrap; }
+        .event.thought { color: #8b949e; font-style: italic; white-space: pre-wrap; }
+        .event.tool-call {
+            background: #1c2128; border-left: 3px solid #d29922;
+            padding: 0.5rem 0.8rem;
+        }
+        .event.tool-call.completed { border-left-color: #3fb950; }
+        .event.plan { background: #1c2128; border-left: 3px solid #58a6ff; padding: 0.5rem 0.8rem; }
+        .event.permission {
+            background: #2d1b00; border: 1px solid #d29922; padding: 0.6rem 0.8rem;
+        }
+        .event.turn-complete {
+            color: #8b949e; font-size: 0.7rem; text-align: center;
+            padding: 0.3rem; border-top: 1px solid #21262d;
+        }
+        .event.state-change { color: #8b949e; font-size: 0.7rem; }
+        .event .ts { color: #484f58; font-size: 0.65rem; margin-right: 0.5rem; }
+        .event .agent-tag {
+            display: inline-block; font-size: 0.6rem; padding: 1px 5px;
+            border-radius: 3px; background: #21262d; color: #58a6ff;
+            margin-right: 0.4rem; font-weight: 600;
+        }
+        .permission-btn {
+            display: inline-block; padding: 3px 10px; margin: 4px 4px 0 0;
+            border: 1px solid #30363d; border-radius: 4px; cursor: pointer;
+            font-size: 0.75rem; background: #21262d; color: #c9d1d9;
+        }
+        .permission-btn.approve { border-color: #3fb950; color: #3fb950; }
+        .permission-btn.deny { border-color: #f85149; color: #f85149; }
+        .permission-btn:hover { opacity: 0.8; }
+        .prompt-bar {
+            display: flex; padding: 0.6rem 1rem; gap: 0.5rem;
+            border-top: 1px solid #30363d; background: #161b22; flex-shrink: 0;
+        }
+        .prompt-bar input {
+            flex: 1; padding: 0.5rem 0.8rem; background: #0d1117;
+            border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9;
+            font-family: inherit; font-size: 0.8rem; outline: none;
+        }
+        .prompt-bar input:focus { border-color: #58a6ff; }
+        .prompt-bar button {
+            padding: 0.5rem 1rem; background: #238636; color: #fff;
+            border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
+        }
+        .prompt-bar button:hover { background: #2ea043; }
+        .prompt-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .empty-state {
+            flex: 1; display: flex; align-items: center; justify-content: center;
+            color: #484f58; font-size: 0.9rem;
         }
     </style>
 </head>
 <body>
-    <header class="header">
-        <h1>CCGONEXT - AI Bridge Console</h1>
-        <div class="project-root" id="project-root-display" title="Project Root Path"></div>
-        <div class="header-right">
-            <nav class="nav-links">
-                <a href="/" class="nav-link" data-nav="overview">Overview</a>
-                <!-- Agent links will be dynamically generated -->
-            </nav>
-            <span class="input-badge disabled" id="input-badge">READ-ONLY</span>
-            <div class="status-badge" id="global-status">Connecting...</div>
-        </div>
-    </header>
-
-    <!-- Overview mode: 2x2 grid -->
-    <div class="container-grid" id="overview-container">
-        <!-- Agent panels will be dynamically generated -->
+    <div class="header">
+        <h1>CCGONEXT</h1>
+        <span class="project-root" id="projectRoot"></span>
     </div>
+    <div class="main">
+        <div class="sidebar">
+            <h2>Sessions</h2>
+            <div id="sessionList"></div>
+        </div>
+        <div class="content">
+            <div class="events" id="events">
+                <div class="empty-state">No events yet. Sessions start on first request.</div>
+            </div>
+            <div class="prompt-bar" id="promptBar" style="display:none;">
+                <input type="text" id="promptInput" placeholder="Send a message...">
+                <button id="promptSend">Send</button>
+            </div>
+        </div>
+    </div>
+<script>
+(function() {
+    let ws = null;
+    let sessions = {};
+    let activeSessionId = null;
+    let allEvents = [];
+    let sessionViews = {};
+    let nextDisplayId = 1;
 
-    <!-- Fullscreen mode: single agent -->
-    <div class="container-full hidden" id="fullscreen-container"></div>
-
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-    <script>
-        // Centralized agent configuration - single source of truth
-        const AGENTS = [
-            { id: 'codex',      label: 'Codex',      icon: '🤖' },
-            { id: 'gemini',     label: 'Gemini',     icon: '💎' },
-            { id: 'opencode',   label: 'OpenCode',   icon: '🔷' },
-            { id: 'claudecode', label: 'ClaudeCode', icon: '🎯' }
-        ];
-
-        // Create a lookup map for efficient access
-        const agentById = Object.fromEntries(AGENTS.map(a => [a.id, a]));
-
-        // Will be populated from server
-        let enabledAgents = [];
-
-        const terminals = {};
-        const websockets = {};
-
-        // Determine current mode from URL
-        const path = window.location.pathname.replace(/^\//, '').toLowerCase();
-        const singleAgent = path && agentById[path] ? path : null;
-
-         function initTerminal(agent, container, forceReadOnly = false) {
-             const canInput = inputEnabled && !forceReadOnly;
-             const term = new Terminal({
-                 theme: {
-                     background: '#1a1a2e',
-                     foreground: '#eee',
-                     cursor: '#e94560'
-                 },
-                 fontSize: 14,
-                 fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                 cursorBlink: canInput,
-                 disableStdin: !canInput,
-                 allowProposedApi: true
-             });
-
-             const fitAddon = new FitAddon.FitAddon();
-             term.loadAddon(fitAddon);
-             term.open(container);
-
-             // Make keyboard input work: ensure xterm gets focus when the user clicks the terminal.
-             container.addEventListener('mousedown', () => term.focus());
-             container.addEventListener('touchstart', () => term.focus(), { passive: true });
-             container.addEventListener('focus', () => term.focus());
-
-             // In fullscreen (single-agent) mode, focus immediately for "type to interact".
-             if (singleAgent) {
-                 requestAnimationFrame(() => term.focus());
-             }
-
-             // Delay fit to ensure container has size
-             requestAnimationFrame(() => {
-                 fitAddon.fit();
-                 sendResize(agent, term.cols, term.rows);
-            });
-
-            terminals[agent] = { term, fitAddon, forceReadOnly };
-
-             // Handle keyboard input
-             term.onData(data => {
-                 if (!inputEnabled || forceReadOnly) return;
-                 if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
-                     websockets[agent].send(data);
-                 }
-             });
-
-             // Handle binary input (for mouse events, etc.)
-             term.onBinary(data => {
-                 if (!inputEnabled || forceReadOnly) return;
-                 if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
-                     const bytes = new Uint8Array(data.length);
-                     for (let i = 0; i < data.length; i++) {
-                         bytes[i] = data.charCodeAt(i);
-                    }
-                    websockets[agent].send(bytes);
-                }
-            });
-
-            return { term, fitAddon };
-        }
-
-        // Send resize command to backend
-        function sendResize(agent, cols, rows) {
-            if (websockets[agent] && websockets[agent].readyState === WebSocket.OPEN) {
-                const cmd = '\x00' + JSON.stringify({ type: 'resize', cols, rows });
-                websockets[agent].send(cmd);
-            }
-        }
-
-        function connectWebSocket(agent) {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${agent}`);
-
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = () => {
-                console.log(`WebSocket connected for ${agent}`);
-                // Send initial resize after connection
-                if (terminals[agent]) {
-                    const { term } = terminals[agent];
-                    sendResize(agent, term.cols, term.rows);
-                }
-            };
-
-            ws.onmessage = (event) => {
-                if (terminals[agent]) {
-                    const data = event.data instanceof ArrayBuffer
-                        ? new TextDecoder().decode(event.data)
-                        : event.data;
-                    terminals[agent].term.write(data);
-                }
-            };
-
-            ws.onclose = () => {
-                console.log(`WebSocket closed for ${agent}`);
-                setTimeout(() => connectWebSocket(agent), 3000);
-            };
-
-            ws.onerror = (err) => {
-                console.error(`WebSocket error for ${agent}:`, err);
-            };
-
-            websockets[agent] = ws;
-        }
-
-        let inputEnabled = false;
-
-        async function fetchStatus() {
+    function connectWs() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        ws.onopen = () => {
+            ws.send(JSON.stringify({type: 'subscribe', from_seq: 0}));
+        };
+        ws.onmessage = (e) => {
             try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
+                const data = JSON.parse(e.data);
+                if (data.type === 'replay_gap') return;
+                if (data.seq) handleEvent(data);
+            } catch(ex) {}
+        };
+        ws.onclose = () => setTimeout(connectWs, 2000);
+    }
 
-                // Update enabled agents list from server
-                const serverAgents = data.agents.map(a => a.name);
-                if (enabledAgents.length === 0) {
-                    // First fetch - initialize enabled agents
-                    enabledAgents = serverAgents;
-                }
+    function handleEvent(ev) {
+        allEvents.push(ev);
+        if (ev.session_id && !sessions[ev.session_id]) {
+            sessions[ev.session_id] = {
+                id: ev.session_id, agent: ev.agent || '?',
+                process_state: 'RUNNING', turn_state: 'IDLE'
+            };
+            renderSessions();
+        }
+        if (ev.payload && ev.payload.type === 'state_change' && sessions[ev.session_id]) {
+            sessions[ev.session_id].process_state = ev.payload.process;
+            sessions[ev.session_id].turn_state = ev.payload.turn;
+            renderSessions();
+        }
+        if (!activeSessionId && ev.session_id) {
+            activeSessionId = ev.session_id;
+            renderSessions();
+        }
+        const displayOp = ingestEvent(ev);
+        if (ev.session_id === activeSessionId) applyDisplayOp(displayOp);
+    }
 
-                // Update input enabled status
-                inputEnabled = data.input_enabled || false;
-                updateInputBadge();
+    function ensureSessionView(sessionId) {
+        if (!sessionViews[sessionId]) {
+            sessionViews[sessionId] = {items: [], currentTurn: null};
+        }
+        return sessionViews[sessionId];
+    }
 
-                // Update project root display
-                const projectRootEl = document.getElementById('project-root-display');
-                if (projectRootEl) {
-                    if (data.project_root) {
-                        projectRootEl.textContent = '📁 ' + data.project_root;
-                        projectRootEl.title = data.project_root;
-                        projectRootEl.style.display = 'block';
-                    } else {
-                        projectRootEl.style.display = 'none';
-                    }
-                }
+    function ingestEvent(ev) {
+        const view = ensureSessionView(ev.session_id);
+        const p = ev.payload || {};
+        if (isTurnScopedEvent(p.type)) {
+            const turn = ensureCurrentTurn(view, ev);
+            mergeTurnEvent(turn, ev);
+            if (p.type === 'turn_complete') view.currentTurn = null;
+            return {action: 'upsert', sessionId: ev.session_id, item: turn};
+        }
 
-                let onlineCount = 0;
-                data.agents.forEach(agent => {
-                    updateAgentStatus(agent.name, agent.state);
-                    if (agent.state !== 'STOPPED' && agent.state !== 'DEAD') {
-                        onlineCount++;
-                    }
+        if (p.type === 'state_change' && !shouldDisplayStateChange(p)) {
+            return {action: 'ignore'};
+        }
+
+        const item = toDisplayItem(ev);
+        view.items.push(item);
+        return {action: 'upsert', sessionId: ev.session_id, item};
+    }
+
+    function isTurnScopedEvent(type) {
+        return type === 'message_chunk' ||
+            type === 'thought_chunk' ||
+            type === 'tool_call' ||
+            type === 'tool_call_update' ||
+            type === 'plan' ||
+            type === 'permission_request' ||
+            type === 'permission_response' ||
+            type === 'turn_complete';
+    }
+
+    function shouldDisplayStateChange(payload) {
+        if (!payload) return false;
+        if (payload.process === 'DEAD' || payload.process === 'STARTING' || payload.process === 'STOPPED') {
+            return true;
+        }
+        return payload.turn === 'CANCELLING';
+    }
+
+    function ensureCurrentTurn(view, ev) {
+        if (view.currentTurn) return view.currentTurn;
+        const turn = {
+            id: nextDisplayId++,
+            type: 'turn',
+            agent: ev.agent || '',
+            timestamp: ev.timestamp,
+            completedAt: null,
+            status: 'in_progress',
+            stopReason: null,
+            entries: []
+        };
+        view.items.push(turn);
+        view.currentTurn = turn;
+        return turn;
+    }
+
+    function mergeTurnEvent(turn, ev) {
+        const p = ev.payload || {};
+        const last = turn.entries[turn.entries.length - 1];
+
+        if (p.type === 'message_chunk' || p.type === 'thought_chunk') {
+            if (last && last.type === p.type) {
+                last.text += p.text || '';
+            } else {
+                turn.entries.push({
+                    id: nextDisplayId++,
+                    type: p.type,
+                    text: p.text || ''
                 });
-
-                document.getElementById('global-status').textContent = `${onlineCount} Online`;
-                return data.agents;
-            } catch (err) {
-                console.error('Failed to fetch status:', err);
-                document.getElementById('global-status').textContent = 'Disconnected';
-                return [];
             }
+            return;
         }
 
-         function updateInputBadge() {
-             const badge = document.getElementById('input-badge');
-             if (badge) {
-                 // In overview mode, always show READ-ONLY
-                 const displayEnabled = singleAgent ? inputEnabled : false;
-                 badge.textContent = displayEnabled ? 'INPUT' : 'READ-ONLY';
-                 badge.className = 'input-badge ' + (displayEnabled ? 'enabled' : 'disabled');
-             }
-
-             // Keep terminal input state in sync with backend config.
-             Object.values(terminals).forEach(({ term, forceReadOnly }) => {
-                 const canInput = inputEnabled && !forceReadOnly;
-                 term.options.disableStdin = !canInput;
-                 term.options.cursorBlink = canInput;
-             });
-         }
-
-        function updateAgentStatus(agent, state) {
-            const dot = document.getElementById(`${agent}-status-dot`);
-            const text = document.getElementById(`${agent}-status-text`);
-
-            if (!dot || !text) return;
-
-            text.textContent = state;
-            dot.className = 'status-dot';
-
-            switch (state) {
-                case 'IDLE':
-                case 'READY_TIMEOUT':
-                    dot.classList.add('running');
-                    break;
-                case 'BUSY':
-                case 'STARTING':
-                    dot.classList.add('busy');
-                    break;
-                case 'STUCK':
-                case 'DEAD':
-                    dot.classList.add('error');
-                    break;
-                default:
-                    dot.classList.add('stopped');
-            }
+        if (p.type === 'tool_call') {
+            turn.entries.push({
+                id: nextDisplayId++,
+                type: 'tool',
+                toolId: p.id,
+                title: p.title,
+                status: normalizeStatus(p.status),
+                output: null
+            });
+            return;
         }
 
-        async function restartAgent(agent) {
-            const agentData = agentById[agent];
-            const label = agentData ? agentData.label : agent;
-            if (!confirm(`Restart ${label}?`)) {
+        if (p.type === 'tool_call_update') {
+            const existingTool = [...turn.entries].reverse().find(entry => entry.type === 'tool' && entry.toolId === p.id);
+            if (existingTool) {
+                existingTool.status = normalizeStatus(p.status);
+                existingTool.output = p.output || existingTool.output || null;
+            } else {
+                turn.entries.push({
+                    id: nextDisplayId++,
+                    type: 'tool',
+                    toolId: p.id,
+                    title: p.id,
+                    status: normalizeStatus(p.status),
+                    output: p.output || null
+                });
+            }
+            return;
+        }
+
+        if (p.type === 'plan') {
+            const existingPlan = [...turn.entries].reverse().find(entry => entry.type === 'plan');
+            if (existingPlan) {
+                existingPlan.entries = p.entries || [];
+            } else {
+                turn.entries.push({
+                    id: nextDisplayId++,
+                    type: 'plan',
+                    entries: p.entries || []
+                });
+            }
+            return;
+        }
+
+        if (p.type === 'permission_request') {
+            turn.entries.push({
+                id: nextDisplayId++,
+                type: 'permission',
+                permissionId: p.id,
+                sessionId: ev.session_id,
+                method: p.method,
+                description: p.description,
+                resolved: false,
+                granted: null
+            });
+            return;
+        }
+
+        if (p.type === 'permission_response') {
+            const existingPermission = [...turn.entries].reverse().find(entry => entry.type === 'permission' && entry.permissionId === p.id);
+            if (existingPermission) {
+                existingPermission.resolved = true;
+                existingPermission.granted = !!p.granted;
+            } else {
+                turn.entries.push({
+                    id: nextDisplayId++,
+                    type: 'permission',
+                    permissionId: p.id,
+                    sessionId: ev.session_id,
+                    method: 'permission',
+                    description: '',
+                    resolved: true,
+                    granted: !!p.granted
+                });
+            }
+            return;
+        }
+
+        if (p.type === 'turn_complete') {
+            turn.status = 'complete';
+            turn.stopReason = p.stop_reason || 'unknown';
+            turn.completedAt = ev.timestamp;
+        }
+    }
+
+    function toDisplayItem(ev) {
+        const p = ev.payload || {};
+        const agent = ev.agent || '';
+        switch (p.type) {
+            case 'state_change':
+                return {
+                    id: nextDisplayId++,
+                    type: 'state_change',
+                    agent,
+                    timestamp: ev.timestamp,
+                    process: p.process,
+                    turn: p.turn
+                };
+            default:
+                return {
+                    id: nextDisplayId++,
+                    type: 'raw',
+                    agent,
+                    timestamp: ev.timestamp,
+                    payload: p
+                };
+        }
+    }
+
+    function applyDisplayOp(op) {
+        const container = document.getElementById('events');
+        const empty = container.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        if (op.action === 'ignore') return;
+
+        if (op.action === 'append') {
+            container.appendChild(renderDisplayItem(op.item));
+        } else {
+            const existing = container.querySelector(`[data-display-id="${op.item.id}"]`);
+            if (existing) {
+                updateDisplayItem(existing, op.item);
+            } else {
+                renderActiveSession();
                 return;
             }
-            const btn = document.getElementById(`${agent}-restart-btn`);
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '...';
-            }
-            try {
-                const res = await fetch(`/api/restart/${agent}`, { method: 'POST' });
-                const data = await res.json();
-                if (!data.success) {
-                    console.error(`Failed to restart ${agent}: ${data.message}`);
-                }
-            } catch (err) {
-                console.error(`Failed to restart ${agent}:`, err);
-            } finally {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = 'Restart';
-                }
-                fetchStatus();
-            }
         }
 
-         function createAgentPanel(agent, isOverview = false) {
-             const agentData = agentById[agent];
-             if (!agentData) return null;
+        container.scrollTop = container.scrollHeight;
+    }
 
-             const panel = document.createElement('div');
-             panel.className = 'agent-panel';
-             panel.dataset.agent = agent;
+    function renderDisplayItem(item) {
+        const el = document.createElement('div');
+        el.dataset.displayId = item.id;
+        updateDisplayItem(el, item);
+        return el;
+    }
 
-             const clickOverlay = isOverview
-                 ? `<div class="terminal-overlay" onclick="window.location.href='/${agent}'">
-                       <span class="click-hint">⛶ Fullscreen</span>
-                    </div>`
-                 : '';
-
-             panel.innerHTML = `
-                 <div class="agent-header">
-                     <div class="agent-name">
-                         <span class="agent-icon" aria-hidden="true">${agentData.icon}</span>
-                         <span>${agentData.label}</span>
-                     </div>
-                     <div class="agent-status">
-                         <button class="restart-btn" id="${agent}-restart-btn" onclick="restartAgent('${agent}')">Restart</button>
-                         <span class="status-dot" id="${agent}-status-dot"></span>
-                         <span id="${agent}-status-text">STOPPED</span>
-                     </div>
-                 </div>
-                 <div class="terminal-wrapper">
-                     <div class="terminal-container" id="${agent}-terminal" tabindex="0"></div>
-                     ${clickOverlay}
-                 </div>
-             `;
-             return panel;
-         }
-
-        function setupFullscreenMode(agent) {
-            document.getElementById('overview-container').classList.add('hidden');
-            const fullContainer = document.getElementById('fullscreen-container');
-            fullContainer.classList.remove('hidden');
-
-            const panel = createAgentPanel(agent);
-            if (panel) {
-                fullContainer.innerHTML = '';
-                fullContainer.appendChild(panel);
-            }
-
-            const agentData = agentById[agent];
-            document.title = `CCGONEXT - ${agentData ? agentData.label : 'Agent'}`;
+    function updateDisplayItem(el, item) {
+        el.className = 'event';
+        switch (item.type) {
+            case 'turn':
+                el.className += ' turn';
+                el.innerHTML =
+                    `<div class="turn-header">` +
+                        `<div class="turn-title">` +
+                            `<span class="agent-tag">${escHtml(item.agent || '')}</span>` +
+                            `<span>${item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ''}</span>` +
+                        `</div>` +
+                        `<span class="turn-badge${item.status === 'complete' ? ' complete' : ''}">` +
+                            `${item.status === 'complete' ? escHtml(item.stopReason || 'complete') : 'streaming'}` +
+                        `</span>` +
+                    `</div>` +
+                    `<div class="turn-body">` +
+                        (item.entries || []).map(entry => renderTurnEntry(entry)).join('') +
+                    `</div>`;
+                break;
+            case 'message_chunk':
+                el.className += ' message';
+                el.innerHTML = eventPrefix(item.timestamp, item.agent) + escHtml(item.text);
+                break;
+            case 'thought_chunk':
+                el.className += ' thought';
+                el.innerHTML = eventPrefix(item.timestamp, item.agent) + escHtml(item.text);
+                break;
+            case 'state_change':
+                el.className += ' state-change';
+                el.innerHTML = eventPrefix(item.timestamp, item.agent) +
+                    `State: ${escHtml(item.process || '')} / ${escHtml(item.turn || '')}`;
+                break;
+            default:
+                el.innerHTML = eventPrefix(item.timestamp, item.agent) + escHtml(JSON.stringify(item.payload || {}));
         }
+    }
 
-        function updateNavLinks() {
-            document.querySelectorAll('.nav-link').forEach(link => {
-                const nav = link.dataset.nav;
-                if ((nav === 'overview' && !singleAgent) || nav === singleAgent) {
-                    link.classList.add('active');
-                }
-            });
+    function renderActiveSession() {
+        const container = document.getElementById('events');
+        container.innerHTML = '';
+        const view = sessionViews[activeSessionId];
+        const items = view ? view.items : [];
+        if (!items.length) {
+            container.innerHTML = '<div class="empty-state">No events for this session.</div>';
+            return;
         }
-
-        // Initialize
-        async function init() {
-            // Fetch enabled agents from server first
-            const agents = await fetchStatus();
-            if (agents.length === 0) {
-                // Fallback to all agents if fetch failed
-                enabledAgents = AGENTS.map(a => a.id);
-            }
-
-            // Dynamically generate navigation links (only for enabled agents)
-            const navContainer = document.querySelector('.nav-links');
-            if (navContainer) {
-                enabledAgents.forEach(agentId => {
-                    const agentData = agentById[agentId];
-                    if (!agentData) return;
-
-                    const navLink = document.createElement('a');
-                    navLink.href = `/${agentData.id}`;
-                    navLink.className = 'nav-link';
-                    navLink.dataset.nav = agentData.id;
-                    navLink.textContent = agentData.label;
-                    navContainer.appendChild(navLink);
-                });
-            }
-
-            // Dynamically generate agent panels for overview mode (only enabled agents)
-            const overviewContainer = document.getElementById('overview-container');
-            if (overviewContainer && !singleAgent) {
-                // Set grid layout based on agent count
-                overviewContainer.setAttribute('data-agent-count', enabledAgents.length);
-
-                enabledAgents.forEach(agentId => {
-                    const agentData = agentById[agentId];
-                    if (!agentData) return;
-
-                    const panel = createAgentPanel(agentData.id, true);
-                    if (panel) {
-                        overviewContainer.appendChild(panel);
-                    }
-                });
-            }
-
-            updateNavLinks();
-
-            if (singleAgent) {
-                setupFullscreenMode(singleAgent);
-                // Initialize terminal and WebSocket in fullscreen mode (respects inputEnabled)
-                const container = document.getElementById(`${singleAgent}-terminal`);
-                if (container) {
-                    initTerminal(singleAgent, container, false);
-                    connectWebSocket(singleAgent);
-                }
-            } else {
-                // Overview mode: initialize terminals for all agents (always read-only)
-                enabledAgents.forEach(agentId => {
-                    const container = document.getElementById(`${agentId}-terminal`);
-                    if (container) {
-                        initTerminal(agentId, container, true);
-                        connectWebSocket(agentId);
-                    }
-                });
-            }
-
-            // Handle resize
-            window.addEventListener('resize', () => {
-                Object.entries(terminals).forEach(([agent, { term, fitAddon }]) => {
-                    fitAddon.fit();
-                    sendResize(agent, term.cols, term.rows);
-                });
-            });
-
-            // Status already fetched, just set interval for updates
-            setInterval(fetchStatus, 5000);
+        for (const item of items) {
+            container.appendChild(renderDisplayItem(item));
         }
+        container.scrollTop = container.scrollHeight;
+    }
 
-        init();
-    </script>
+    function eventPrefix(timestamp, agent) {
+        const ts = timestamp ? new Date(timestamp).toLocaleTimeString() : '';
+        return `<span class="ts">${ts}</span><span class="agent-tag">${escHtml(agent || '')}</span>`;
+    }
+
+    function normalizeStatus(status) {
+        if (!status) return '';
+        const text = String(status);
+        const match = text.match(/^Some\((.*)\)$/);
+        return match ? match[1] : text;
+    }
+
+    function isCompletedStatus(status) {
+        const normalized = normalizeStatus(status).toLowerCase();
+        return normalized === 'completed' || normalized === 'done' || normalized === 'success' || normalized === 'succeeded';
+    }
+
+    function planStatusMarker(status) {
+        const normalized = String(status || '').toLowerCase();
+        return normalized === 'completed' ? '✓' : '○';
+    }
+
+    function planSummary(entries) {
+        const total = entries.length;
+        const completed = entries.filter(entry => String(entry.status || '').toLowerCase() === 'completed').length;
+        return `${completed}/${total} done`;
+    }
+
+    function renderTurnEntry(entry) {
+        switch (entry.type) {
+            case 'message_chunk':
+                return `<div class="turn-entry message">${escHtml(entry.text || '')}</div>`;
+            case 'thought_chunk':
+                return `<details class="turn-entry thought">` +
+                    `<summary class="turn-thought-toggle"><span class="turn-thought-label">Thought</span></summary>` +
+                    `<div class="turn-thought-body">${escHtml(entry.text || '')}</div>` +
+                `</details>`;
+            case 'tool':
+                return `<details class="turn-entry tool${isCompletedStatus(entry.status) ? ' completed' : ''}">` +
+                    `<summary class="turn-disclosure"><b>${escHtml(entry.title || entry.toolId || 'tool')}</b> <small>[${escHtml(entry.status || 'pending')}]</small></summary>` +
+                    `<div class="turn-detail-body">` +
+                        `<small>ID: ${escHtml(entry.toolId || '')}</small>` +
+                        (entry.output ? `<small>${escHtml(entry.output)}</small>` : `<small>No tool output</small>`) +
+                    `</div>` +
+                `</details>`;
+            case 'plan':
+                return `<details class="turn-entry plan">` +
+                    `<summary class="turn-disclosure"><b>Plan</b> <small>${planSummary(entry.entries || [])}</small></summary>` +
+                    `<div class="turn-detail-body turn-plan-list">` +
+                        (entry.entries || []).map(item =>
+                            `<div>${planStatusMarker(item.status)} ${escHtml(item.content)}</div>`
+                        ).join('') +
+                    `</div>` +
+                `</details>`;
+            case 'permission':
+                return `<div class="turn-entry permission${entry.resolved ? ' resolved' : ''}" data-perm-id="${escHtml(entry.permissionId || '')}" data-session-id="${escHtml(entry.sessionId || '')}">` +
+                    `<b>Permission:</b> ${escHtml(entry.method || 'permission')}<br>` +
+                    (entry.description ? `<small>${escHtml(entry.description)}</small><br>` : '') +
+                    (entry.resolved
+                        ? `<small>${entry.granted ? 'Approved' : 'Denied'}</small>`
+                        : `<span class="permission-btn approve" onclick="respondPerm('${entry.sessionId}','${entry.permissionId}',true)">Approve</span>` +
+                          `<span class="permission-btn deny" onclick="respondPerm('${entry.sessionId}','${entry.permissionId}',false)">Deny</span>`) +
+                `</div>`;
+            default:
+                return `<div class="turn-entry">${escHtml(JSON.stringify(entry || {}))}</div>`;
+        }
+    }
+
+    function renderSessions() {
+        const list = document.getElementById('sessionList');
+        list.innerHTML = '';
+        for (const s of Object.values(sessions)) {
+            const el = document.createElement('div');
+            el.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+            const dotClass = (s.process_state||'').toLowerCase();
+            el.innerHTML = `<div class="agent-name"><span class="dot ${dotClass}"></span>${escHtml(s.agent)}</div>` +
+                `<div class="session-meta">${s.process_state} / ${s.turn_state}</div>`;
+            el.onclick = () => selectSession(s.id);
+            list.appendChild(el);
+        }
+        const bar = document.getElementById('promptBar');
+        bar.style.display = activeSessionId ? 'flex' : 'none';
+    }
+
+    function selectSession(id) {
+        activeSessionId = id;
+        renderSessions();
+        renderActiveSession();
+    }
+
+    window.respondPerm = function(sessionId, permId, granted) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'permission_response', session_id: sessionId, id: permId, granted
+            }));
+        }
+        const btns = document.querySelectorAll(`[data-perm-id="${permId}"] .permission-btn`);
+        btns.forEach(b => b.remove());
+    };
+
+    function sendPrompt() {
+        if (!activeSessionId) return;
+        const input = document.getElementById('promptInput');
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = '';
+        const btn = document.getElementById('promptSend');
+        btn.disabled = true;
+        fetch(`/api/prompt/${activeSessionId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({text})
+        }).then(r => r.json()).then(data => {
+            btn.disabled = false;
+            if (!data.success && data.error) {
+                alert('Error: ' + data.error);
+            }
+        }).catch(() => { btn.disabled = false; });
+    }
+
+    document.getElementById('promptSend').onclick = sendPrompt;
+    document.getElementById('promptInput').onkeydown = (e) => {
+        if (e.key === 'Enter') sendPrompt();
+    };
+
+    function escHtml(s) {
+        if (!s) return '';
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    fetch('/api/status').then(r=>r.json()).then(data => {
+        document.getElementById('projectRoot').textContent = data.project_root || '';
+    }).catch(()=>{});
+
+    fetch('/api/sessions').then(r=>r.json()).then(data => {
+        for (const s of (data.sessions||[])) {
+            sessions[s.id] = s;
+        }
+        renderSessions();
+    }).catch(()=>{});
+
+    connectWs();
+})();
+</script>
 </body>
 </html>

@@ -1,263 +1,174 @@
-//! WebSocket handler for real-time PTY output
-
 use super::AppState;
+use crate::events::ReplayResult;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        State,
     },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
-use tracing::warn;
+use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
-/// Minimum terminal size (columns or rows)
-const MIN_TERMINAL_SIZE: u16 = 1;
-/// Maximum terminal size (columns or rows)
-const MAX_TERMINAL_SIZE: u16 = 500;
-/// Interval to check for PTY availability when agent is not running
-const PTY_POLL_INTERVAL_MS: u64 = 1000;
-
-/// Control command from frontend (sent as JSON with \x00 prefix)
-/// Note: Control commands (like resize) are intentionally allowed even when
-/// input_enabled is false. This is because:
-/// 1. Resize is not user input - it's terminal synchronization
-/// 2. Correct terminal size is needed for proper output rendering
-/// 3. Read-only viewers still need accurate terminal dimensions
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum ControlCommand {
-    Resize { cols: u16, rows: u16 },
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
+enum ClientMessage {
+    Subscribe {
+        #[serde(default)]
+        from_seq: u64,
+    },
+    Prompt {
+        session_id: String,
+        text: String,
+    },
+    Cancel {
+        session_id: String,
+    },
+    PermissionResponse {
+        session_id: String,
+        id: String,
+        granted: bool,
+    },
 }
 
-/// Message types to send to PTY
-enum PtyMessage {
-    Input(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    Path(agent_name): Path<String>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, agent_name))
-}
+async fn handle_socket(socket: WebSocket, state: AppState) {
+    let (ws_sender, mut receiver) = socket.split();
+    let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
-async fn handle_socket(socket: WebSocket, state: AppState, agent_name: String) {
-    let (mut sender, receiver) = socket.split();
+    let event_log = state.session_manager.event_log().clone();
+    let mut event_rx = event_log.subscribe();
+    let replay_ready = Arc::new(Notify::new());
+    let replay_started = Arc::new(AtomicBool::new(false));
+    let replay_seq = Arc::new(AtomicU64::new(0));
 
-    // Get the session for this agent
-    let Some(session) = state.session_manager.get(&agent_name).await else {
-        let _ = sender
-            .send(Message::Text(format!(
-                "Error: Agent {} not found",
-                agent_name
-            )))
-            .await;
-        return;
-    };
+    let (action_tx, mut action_rx) = mpsc::channel::<ClientMessage>(32);
 
-    // Wait for PTY to become available (agent may not be started yet)
-    let pty = loop {
-        let pty_guard = session.pty.read().await;
-        if let Some(pty) = pty_guard.as_ref() {
-            break Arc::clone(pty);
-        }
-        drop(pty_guard);
-
-        // Send waiting message to client
-        if sender
-            .send(Message::Text(format!(
-                "\x1b[33mWaiting for agent {} to start...\x1b[0m\r\n",
-                agent_name
-            )))
-            .await
-            .is_err()
-        {
-            return;
-        }
-
-        // Wait before checking again
-        tokio::time::sleep(Duration::from_millis(PTY_POLL_INTERVAL_MS)).await;
-    };
-
-    // Send buffered output first
-    let buffer = pty.get_buffer().await;
-    if !buffer.is_empty() {
-        let _ = sender.send(Message::Binary(buffer)).await;
-    }
-
-    // Subscribe to new output
-    let output_rx = pty.subscribe_output();
-
-    // Spawn task to forward PTY output to WebSocket
-    let mut send_task = spawn_send_task(sender, output_rx);
-
-    // Handle incoming messages using a channel to avoid Send issues
-    let input_enabled = state.config.web.input_enabled;
-    let (input_tx, input_rx) = mpsc::channel::<PtyMessage>(32);
-
-    // Task to process input and control commands
-    let mut input_task = spawn_input_task(session.clone(), input_rx);
-
-    // Task to receive WebSocket messages
-    let mut recv_task = spawn_recv_task(receiver, input_tx, input_enabled);
-
-    // Wait for either task to complete
-    tokio::select! {
-        _ = &mut send_task => {},
-        _ = &mut recv_task => {},
-        _ = &mut input_task => {},
-    }
-
-    send_task.abort();
-    recv_task.abort();
-    input_task.abort();
-}
-
-fn spawn_send_task(
-    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut output_rx: broadcast::Receiver<Vec<u8>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    // Send task: forward events to client
+    let sender_clone = ws_sender.clone();
+    let replay_ready_send = replay_ready.clone();
+    let replay_started_send = replay_started.clone();
+    let replay_seq_send = replay_seq.clone();
+    let send_task = tokio::spawn(async move {
         loop {
-            match output_rx.recv().await {
-                Ok(data) => {
-                    if sender.send(Message::Binary(data)).await.is_err() {
-                        break;
+            let notified = replay_ready_send.notified();
+            if replay_started_send.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => {
+                    let last_replayed_seq = replay_seq_send.load(Ordering::SeqCst);
+                    if event.seq <= last_replayed_seq {
+                        continue;
+                    }
+                    replay_seq_send.store(event.seq, Ordering::SeqCst);
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        let mut sender = sender_clone.lock().await;
+                        if sender.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("WebSocket output lagged by {} messages", n);
-                    continue;
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("WebSocket lagged by {} events", n);
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    })
-}
+    });
 
-fn spawn_input_task(
-    session: Arc<crate::session::AgentSession>,
-    mut input_rx: mpsc::Receiver<PtyMessage>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some(msg) = input_rx.recv().await {
-            let pty_guard = session.pty.read().await;
-            if let Some(pty) = pty_guard.as_ref() {
-                match msg {
-                    PtyMessage::Input(data) => {
-                        let _ = pty.write(&data).await;
-                    }
-                    PtyMessage::Resize { cols, rows } => {
-                        let _ = pty.resize(cols, rows).await;
-                    }
-                }
-            }
-            drop(pty_guard);
-        }
-    })
-}
-
-fn spawn_recv_task(
-    mut receiver: futures_util::stream::SplitStream<WebSocket>,
-    input_tx: mpsc::Sender<PtyMessage>,
-    input_enabled: bool,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    // Recv task: parse client messages
+    let action_tx_clone = action_tx.clone();
+    let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
-                    // Check for control command (starts with \x00)
-                    if let Some(json_str) = text.strip_prefix('\x00') {
-                        match serde_json::from_str::<ControlCommand>(json_str) {
-                            Ok(cmd) => match cmd {
-                                ControlCommand::Resize { cols, rows } => {
-                                    // Clamp values to reasonable bounds
-                                    let cols = cols.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-                                    let rows = rows.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-                                    let _ = input_tx.send(PtyMessage::Resize { cols, rows }).await;
-                                }
-                            },
-                            Err(e) => {
-                                warn!("Invalid control command: {}", e);
-                            }
+                    if let Ok(cmd) = serde_json::from_str::<ClientMessage>(&text) {
+                        if action_tx_clone.send(cmd).await.is_err() {
+                            break;
                         }
-                    } else if input_enabled {
-                        let _ = input_tx.send(PtyMessage::Input(text.into_bytes())).await;
-                    }
-                }
-                Message::Binary(data) => {
-                    if input_enabled {
-                        let _ = input_tx.send(PtyMessage::Input(data)).await;
                     }
                 }
                 Message::Close(_) => break,
                 _ => {}
             }
         }
-    })
-}
+    });
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    // Action task: handle client commands
+    let sm = state.session_manager.clone();
+    let sender_clone2 = ws_sender.clone();
+    let replay_ready_action = replay_ready.clone();
+    let replay_started_action = replay_started.clone();
+    let replay_seq_action = replay_seq.clone();
+    let action_task = tokio::spawn(async move {
+        while let Some(cmd) = action_rx.recv().await {
+            match cmd {
+                ClientMessage::Subscribe { from_seq } => {
+                    let replay = event_log.replay_from(from_seq);
+                    let (events, gap) = match replay {
+                        ReplayResult::Complete(evts) => (evts, None),
+                        ReplayResult::Partial {
+                            events,
+                            oldest_available_seq,
+                        } => (events, Some(oldest_available_seq)),
+                    };
 
-    #[test]
-    fn test_control_command_resize_parsing() {
-        let json = r#"{"type":"resize","cols":80,"rows":24}"#;
-        let cmd: ControlCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            ControlCommand::Resize { cols, rows } => {
-                assert_eq!(cols, 80);
-                assert_eq!(rows, 24);
+                    let mut sender = sender_clone2.lock().await;
+                    if let Some(oldest) = gap {
+                        let gap_msg = serde_json::json!({
+                            "type": "replay_gap",
+                            "oldest_available_seq": oldest,
+                            "requested_seq": from_seq,
+                        });
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&gap_msg).unwrap()))
+                            .await;
+                    }
+                    let max_replayed_seq = events.last().map(|event| event.seq).unwrap_or(0);
+                    for event in events {
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            if sender.send(Message::Text(json)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+
+                    replay_seq_action.store(max_replayed_seq, Ordering::SeqCst);
+                    replay_started_action.store(true, Ordering::SeqCst);
+                    replay_ready_action.notify_waiters();
+                }
+                ClientMessage::PermissionResponse {
+                    session_id,
+                    id,
+                    granted,
+                } => {
+                    if let Some(session) = sm.get_by_id(&session_id).await {
+                        session.respond_to_permission(&id, granted).await;
+                    }
+                }
+                ClientMessage::Prompt { .. } | ClientMessage::Cancel { .. } => {
+                    // Prompt/cancel via WebSocket is not supported; use REST API
+                }
             }
         }
-    }
+    });
 
-    #[test]
-    fn test_control_command_invalid_type() {
-        let json = r#"{"type":"unknown","cols":80,"rows":24}"#;
-        let result = serde_json::from_str::<ControlCommand>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_control_command_missing_fields() {
-        let json = r#"{"type":"resize","cols":80}"#;
-        let result = serde_json::from_str::<ControlCommand>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resize_value_clamping() {
-        // Test minimum clamping
-        let cols: u16 = 0;
-        let rows: u16 = 0;
-        let clamped_cols = cols.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        let clamped_rows = rows.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        assert_eq!(clamped_cols, MIN_TERMINAL_SIZE);
-        assert_eq!(clamped_rows, MIN_TERMINAL_SIZE);
-
-        // Test maximum clamping
-        let cols: u16 = 1000;
-        let rows: u16 = 1000;
-        let clamped_cols = cols.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        let clamped_rows = rows.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        assert_eq!(clamped_cols, MAX_TERMINAL_SIZE);
-        assert_eq!(clamped_rows, MAX_TERMINAL_SIZE);
-
-        // Test normal values
-        let cols: u16 = 120;
-        let rows: u16 = 40;
-        let clamped_cols = cols.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        let clamped_rows = rows.clamp(MIN_TERMINAL_SIZE, MAX_TERMINAL_SIZE);
-        assert_eq!(clamped_cols, 120);
-        assert_eq!(clamped_rows, 40);
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+        _ = action_task => {},
     }
 }

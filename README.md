@@ -1,39 +1,53 @@
-# CCGONEXT - Claude Code Gateway for Multi-AI Orchestration (Next)
+# CCGONEXT
 
 [中文文档](README_zh.md)
 
-CCGONEXT is an MCP (Model Context Protocol) server that enables Claude Code to orchestrate multiple AI coding assistants (Codex, Gemini, OpenCode) through a unified interface.
+CCGONEXT is an MCP server that lets Claude Code orchestrate multiple coding agents through a single MCP tool while exposing a structured ACP activity UI in the browser.
 
-## Features
+## What It Does
 
-- **MCP Protocol Support** - Runs as an MCP server over stdio, seamlessly integrates with Claude Code
-- **Multi-Agent Management** - Manage Codex, Gemini, and OpenCode agents from a single interface
-- **PTY-based Execution** - Each agent runs in its own pseudo-terminal with full TUI support
-- **Web UI Console** - Real-time terminal output via WebSocket, accessible from browser
-- **Cross-Platform** - Works on Windows (ConPTY), Linux, and macOS
-- **Zero Configuration** - Sensible defaults, all options via CLI args or environment variables
-- **Auto-Start Agents** - Agents are automatically started when first message is sent
-- **Embedded Static Files** - Single binary deployment, no external files needed
+- Runs as an MCP server over stdio
+- Talks to agents through ACP (Agent Client Protocol) over stdio, not PTY mirroring
+- Supports `codex`, `gemini`, `opencode`, and `claudecode`
+- Keeps per-agent, per-working-directory sessions
+- Streams structured events to the web UI: messages, thoughts, plans, tool calls, permissions, and state changes
+- Lets the browser send follow-up prompts to existing sessions
+- Supports configurable ACP callback policy per agent
+- Ships as a single binary with embedded static assets
+
+## Supported Agent Commands
+
+Default ACP commands:
+
+- `codex` -> `codex-acp`
+- `gemini` -> `gemini --acp`
+- `opencode` -> `opencode acp`
+- `claudecode` -> `claude-agent-acp`
+
+You can override any of these with CLI flags or environment variables.
 
 ## Installation
 
 ### From Source
 
 ```bash
-cd ccgonext
 cargo build --release
-# Binary at target/release/ccgonext (or ccgonext.exe on Windows)
 ```
 
-### Pre-built Binaries
+Binary output:
+
+- Linux/macOS: `target/release/ccgonext`
+- Windows: `target/release/ccgonext.exe`
+
+### Prebuilt Binaries
 
 Download from [Releases](https://github.com/missdeer/ccgonext/releases).
 
 ## Quick Start
 
-### As MCP Server (with Claude Code)
+### Use with Claude Code
 
-Add to your Claude Code MCP configuration:
+Add this to your Claude Code MCP config:
 
 ```json
 {
@@ -46,205 +60,251 @@ Add to your Claude Code MCP configuration:
 }
 ```
 
-### Standalone Web UI
+### Run the Web UI
 
 ```bash
-# Start web server only
-ccgonext web
-
-# Or auto-open the UI in your browser
 ccgonext web --open-browser
 ```
 
-## Usage
+### Inspect the Effective Config
 
+```bash
+ccgonext config
 ```
+
+## Commands
+
+```text
 ccgonext [OPTIONS] [COMMAND]
 
 Commands:
-  serve   Run as MCP server (stdio mode) with web UI [default]
+  serve   Run as MCP server (stdio mode) with web UI
   web     Run web server only (standalone mode)
   config  Show current configuration
-
-Options:
-  -p, --port <PORT>           Web server port [env: CCGONEXT_PORT] [default: 8765]
-      --host <HOST>           Web server host [env: CCGONEXT_HOST] [default: 127.0.0.1]
-      --port-retry <COUNT>    Retry binding to successive ports if the port is in use [env: CCGONEXT_PORT_RETRY] [default: 0]
-      --open-browser          Auto-open the web UI in a browser (web mode only) [env: CCGONEXT_OPEN_BROWSER]
-      --show-project-root     Expose local project root path in the web UI/status API [env: CCGONEXT_SHOW_PROJECT_ROOT]
-      --windows-enter-delay-ms <MS>  Windows: delay between CR/LF in Enter key sequence [env: CCGONEXT_WINDOWS_ENTER_DELAY_MS] [default: 200]
-      --input-enabled         Enable web terminal input [env: CCGONEXT_INPUT_ENABLED]
-      --auth-token <TOKEN>    Auth token for web API [env: CCGONEXT_AUTH_TOKEN]
-      --buffer-size <SIZE>    Output buffer size in bytes [env: CCGONEXT_BUFFER_SIZE] [default: 10485760]
-      --timeout <SECONDS>     Default request timeout [env: CCGONEXT_TIMEOUT] [default: 600]
-      --codex-cmd <CMD>       Codex command [env: CCGONEXT_CODEX_CMD] [default: codex]
-      --gemini-cmd <CMD>      Gemini command [env: CCGONEXT_GEMINI_CMD] [default: gemini]
-      --opencode-cmd <CMD>    OpenCode command [env: CCGONEXT_OPENCODE_CMD] [default: opencode]
-      --claudecode-cmd <CMD>  ClaudeCode command [env: CCGONEXT_CLAUDECODE_CMD] [default: claude]
-      --agents <LIST>         Agents to enable (comma-separated: codex,gemini,opencode,claudecode) [env: CCGONEXT_AGENTS] [default: codex,gemini,opencode]
-      --max-start-retries <N>  Maximum number of retries when agent fails to start [env: CCGONEXT_MAX_START_RETRIES] [default: 3]
-      --start-retry-delay <MS> Base delay in milliseconds for exponential backoff between retries [env: CCGONEXT_START_RETRY_DELAY] [default: 1000]
-      --log-file <PATH>       Log file path (optional, if not set logs only go to stderr) [env: CCGONEXT_LOG_FILE]
-      --log-dir <PATH>        Log directory for rotating logs [env: CCGONEXT_LOG_DIR]
-  -h, --help                  Print help
-  -V, --version               Print version
 ```
 
-## MCP Tools
+Key options:
 
-CCGONEXT exposes a single MCP tool:
+| Option | Env | Default |
+|---|---|---|
+| `--port` | `CCGONEXT_PORT` | `8765` |
+| `--host` | `CCGONEXT_HOST` | `127.0.0.1` |
+| `--port-retry` | `CCGONEXT_PORT_RETRY` | `0` |
+| `--open-browser` | `CCGONEXT_OPEN_BROWSER` | `false` |
+| `--auth-token` | `CCGONEXT_AUTH_TOKEN` | unset |
+| `--timeout` | `CCGONEXT_TIMEOUT` | `600` |
+| `--idle-timeout` | `CCGONEXT_IDLE_TIMEOUT` | `900` |
+| `--agents` | `CCGONEXT_AGENTS` | `codex,gemini,opencode` |
+| `--codex-cmd` | `CCGONEXT_CODEX_CMD` | `codex-acp` |
+| `--gemini-cmd` | `CCGONEXT_GEMINI_CMD` | `gemini` |
+| `--opencode-cmd` | `CCGONEXT_OPENCODE_CMD` | `opencode` |
+| `--claudecode-cmd` | `CCGONEXT_CLAUDECODE_CMD` | `claude-agent-acp` |
+| `--callback-policy` | `CCGONEXT_CALLBACK_POLICY` | `auto-approve` |
+| `--codex-callback-policy` | `CCGONEXT_CODEX_CALLBACK_POLICY` | inherit global |
+| `--gemini-callback-policy` | `CCGONEXT_GEMINI_CALLBACK_POLICY` | inherit global |
+| `--opencode-callback-policy` | `CCGONEXT_OPENCODE_CALLBACK_POLICY` | inherit global |
+| `--claudecode-callback-policy` | `CCGONEXT_CLAUDECODE_CALLBACK_POLICY` | inherit global |
+| `--log-file` | `CCGONEXT_LOG_FILE` | unset |
+| `--log-dir` | `CCGONEXT_LOG_DIR` | unset |
+
+For the full generated help:
+
+```bash
+ccgonext --help
+```
+
+## Callback Policy
+
+ACP agents can request permissions, file access, and terminal execution through callbacks. CCGONEXT supports four policies:
+
+- `deny-all`
+- `read-only`
+- `ask`
+- `auto-approve`
+
+Current default:
+
+- All enabled agents default to `auto-approve`
+
+Examples:
+
+```bash
+# Default behavior
+ccgonext serve
+
+# One policy for all enabled agents
+ccgonext serve --callback-policy read-only
+
+# Override a single agent
+ccgonext serve --callback-policy read-only --codex-callback-policy auto-approve
+```
+
+Environment variable equivalents:
+
+```bash
+export CCGONEXT_CALLBACK_POLICY=read-only
+export CCGONEXT_CODEX_CALLBACK_POLICY=auto-approve
+export CCGONEXT_GEMINI_CALLBACK_POLICY=ask
+```
+
+`auto-approve` is convenient, but it also means the agent can automatically approve ACP actions such as file writes and terminal execution. If that is too permissive for your environment, use `read-only`, `ask`, or `deny-all`.
+
+## MCP Tool
+
+CCGONEXT exposes one MCP tool: `ask_agents`.
 
 ### `ask_agents`
 
-Send messages to AI agents in parallel and wait for responses. Agents are auto-started if not running.
+Send prompts to 1-4 agents in parallel.
+
+Request:
 
 ```json
 {
   "requests": [
-    {"agent": "codex", "message": "Review this code"},
-    {"agent": "gemini", "message": "Suggest improvements"}
+    { "agent": "codex", "message": "Review this change" },
+    { "agent": "gemini", "message": "Look for edge cases" }
   ],
-  "timeout": 300
+  "timeout": 300,
+  "project_root_path": "/path/to/project"
 }
 ```
 
-**Parameters:**
-- `requests`: Array of 1-4 agent requests
-  - `agent`: "codex" | "gemini" | "opencode" | "claudecode"
-  - `message`: Prompt to send
-- `timeout`: Optional seconds (default: 600, max: 1800)
+Rules:
 
-**Response:**
+- `requests` must contain 1-4 items
+- agent names must be unique within a single call
+- `timeout` is in seconds
+- max timeout is `1800`
+- `project_root_path` is optional; if omitted, the current process working directory is used
+
+Response:
+
 ```json
 {
   "results": [
-    {"agent": "codex", "success": true, "response": "..."},
-    {"agent": "gemini", "success": true, "response": "..."}
+    {
+      "agent": "codex",
+      "success": true,
+      "response": "..."
+    },
+    {
+      "agent": "gemini",
+      "success": false,
+      "error": "Request timed out"
+    }
   ]
 }
 ```
 
 ## Web UI
 
-Access the web interface at `http://localhost:8765`:
+The web UI is a structured activity view, not a terminal mirror.
 
-| URL | Description |
-|-----|-------------|
-| `/` | Overview - 2x2 grid showing all agents |
-| `/codex` | Full-screen Codex terminal |
-| `/gemini` | Full-screen Gemini terminal |
-| `/opencode` | Full-screen OpenCode terminal |
-| `/claudecode` | Full-screen ClaudeCode terminal |
+Current behavior:
 
-### Web API
+- Left sidebar shows active sessions
+- Main pane shows turn cards
+- Message text is expanded
+- Thought blocks are collapsed by default
+- Tool and plan sections are summary-first and expandable
+- Permission requests can be approved or denied from the browser
+- Follow-up prompts can be sent to an existing session
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | Get status of all agents |
-| `/ws/:agent` | WebSocket | Real-time terminal I/O |
+Sessions are keyed by:
 
-## Environment Variables
+- agent name
+- working directory
 
-All CLI options can be set via environment variables:
+## Web API
 
-```bash
-export CCGONEXT_PORT=9000
-export CCGONEXT_HOST=0.0.0.0
-export CCGONEXT_PORT_RETRY=20
-export CCGONEXT_INPUT_ENABLED=true
-export CCGONEXT_AUTH_TOKEN=your-secret-token
-export CCGONEXT_OPEN_BROWSER=true
-export CCGONEXT_SHOW_PROJECT_ROOT=true
-export CCGONEXT_WINDOWS_ENTER_DELAY_MS=200
-export CCGONEXT_AGENTS=codex,gemini
-ccgonext web
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/status` | `GET` | Current agent/process summary |
+| `/api/sessions` | `GET` | Active session list |
+| `/api/prompt/{session_id}` | `POST` | Send a follow-up prompt to an existing session |
+| `/api/permission/{session_id}` | `POST` | Respond to a pending permission request |
+| `/ws` | `GET` | WebSocket event stream |
+
+Example prompt request:
+
+```json
+{
+  "text": "Continue and fix the failing tests",
+  "timeout": 120
+}
 ```
 
-## WSL2 Network Access
+Example permission response:
 
-When running in WSL2, to access the web UI from Windows:
-
-```bash
-# Bind to all interfaces inside WSL (so Windows can reach it)
-ccgonext web --host 0.0.0.0
-```
-
-The web UI enforces a localhost-only Origin check by default, so accessing via the WSL IP won't work. Use Windows port forwarding and access via `http://localhost:8765`.
-
-Set up port forwarding in PowerShell (Admin):
-
-```powershell
-netsh interface portproxy add v4tov4 listenport=8765 listenaddress=0.0.0.0 connectport=8765 connectaddress=$(wsl hostname -I)
+```json
+{
+  "id": "permission-id",
+  "granted": true
+}
 ```
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Claude Code                                                 │
-│   └── MCP Client ──────────────────────────────────────┐    │
-└────────────────────────────────────────────────────────│────┘
-                                                         │
-┌────────────────────────────────────────────────────────│────┐
-│ CCGONEXT MCP Server                                        │    │
-│   ┌──────────────┐    ┌─────────────────────────────┐  │    │
-│   │ MCP Handler  │◄───│ stdio (JSON-RPC)            │◄─┘    │
-│   └──────┬───────┘    └─────────────────────────────┘       │
-│          │                                                  │
-│   ┌──────▼───────┐    ┌─────────────────────────────┐       │
-│   │ Session Mgr  │───►│ PTY Manager                 │       │
-│   └──────────────┘    │  ├── codex (ConPTY/TTY)     │       │
-│          │            │  ├── gemini (ConPTY/TTY)    │       │
-│          │            │  └── opencode (ConPTY/TTY)  │       │
-│   ┌──────▼───────┐    └─────────────────────────────┘       │
-│   │ Log Provider │                                          │
-│   │  ├── Codex   │    ┌─────────────────────────────┐       │
-│   │  ├── Gemini  │    │ Web Server (axum)           │       │
-│   │  └── OpenCode│    │  ├── REST API               │       │
-│   └──────────────┘    │  ├── WebSocket              │       │
-│                       │  └── Static Files           │       │
-└───────────────────────┴─────────────────────────────────────┘
+```text
+Claude Code / MCP Client
+        |
+        | MCP JSON-RPC
+        v
+  CCGONEXT
+    |
+    | ask_agents
+    v
+  SessionManager
+    |
+    +-- AcpSession(agent, cwd)
+            |
+            +-- ACP subprocess over stdio
+            +-- structured event log
+            +-- callback policy enforcement
+            +-- timeout / restart handling
+    |
+    +-- Web server
+            |
+            +-- REST API
+            +-- /ws event stream
+            +-- browser activity UI
 ```
 
-## Building
+Main modules:
+
+- `src/acp/` - ACP process, protocol, and callback handling
+- `src/session/` - session lifecycle and timeout handling
+- `src/events.rs` - replayable event log
+- `src/mcp/` - MCP server and tool handling
+- `src/web/` - browser API and WebSocket streaming
+
+## Development
 
 ```bash
-# Debug build
 cargo build
-
-# Release build (optimized, stripped)
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run clippy
+cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
 ## License
 
-This project is dual-licensed:
+This project is dual-licensed.
 
 ### Non-Commercial / Personal Use
-**GNU General Public License v3.0 (GPL-3.0)**
 
-Free for:
-- Personal projects and hobby use
-- Educational purposes and academic research
-- Open source projects
-- Evaluation and testing
+GNU General Public License v3.0 (`GPL-3.0`)
 
 ### Commercial / Workplace Use
-**Commercial License Required**
 
-A commercial license is required if you use this software:
-- In a workplace environment (for-profit or non-profit)
-- As part of commercial products or services
-- For internal business tools or operations
-- For consulting or client work
-- As a SaaS or cloud service
+Commercial license required.
 
-For commercial licensing inquiries, please contact: **missdeer@gmail.com**
+For commercial licensing inquiries:
 
-See [LICENSE](LICENSE) and [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) for details.
+- `missdeer@gmail.com`
+
+See:
+
+- [LICENSE](LICENSE)
+- [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL)
