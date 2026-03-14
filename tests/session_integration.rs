@@ -1,11 +1,14 @@
 use ccgonext::config::AgentConfig;
 use ccgonext::events::EventLog;
+#[cfg(windows)]
 use ccgonext::mcp::{execute_tool, AskAgentsResponse};
 use ccgonext::session::SessionManager;
 use ccgonext::state::{ProcessState, TurnState};
+#[cfg(windows)]
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
 #[tokio::test]
