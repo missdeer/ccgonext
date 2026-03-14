@@ -140,13 +140,12 @@ Upon seeing code, immediately make a three‑layer judgment:
 
 The system is built in Rust and follows a modular architecture:
 
-*   **MCP Server (`src/mcp/`)**: Implements the Model Context Protocol over stdio using JSON-RPC. It handles tool calls from Claude Code (specifically `ask_agent`). It supports both JSON Lines and LSP-style transport.
-*   **Session Management (`src/session/`)**: Manages the lifecycle of agent sessions. It handles queuing requests, auto-starting agents, and routing messages.
-*   **Agent Abstraction (`src/agent/`)**: Defines a trait `Agent` that standardizes how to interact with different AI tools. Specific implementations exist for Codex, Gemini, and OpenCode.
-*   **PTY Manager (`src/pty/`)**: Uses `portable-pty` to spawn and manage pseudo-terminals for each agent. It handles I/O capture and buffering.
-*   **Log Provider (`src/log_provider/`)**: Watches agent log files to detect when a reply has been generated, enabling the request-response cycle required by MCP.
-*   **Web UI (`src/web/`)**: An Axum-based web server that provides a real-time console view of the running agents via WebSockets. It serves embedded static files and exposes a REST API for agent control.
-*   **Configuration (`src/config/`)**: Centralized configuration handling using environment variables and CLI arguments.
+*   **MCP Server (`src/mcp/`)**: Implements the Model Context Protocol over stdio using JSON-RPC. It handles tool calls from Claude Code (specifically `ask_agents`). It supports both JSON Lines and LSP-style transport.
+*   **Session Management (`src/session/`)**: Manages AcpSession lifecycle per agent per working directory. Handles auto-start, idle timeout reaping, and request routing.
+*   **ACP Client (`src/acp/`)**: Communicates with agents via Agent Client Protocol (ACP) over stdio using structured JSON-RPC. Includes client, process management, protocol types, and callback handling (permissions, file I/O, terminals).
+*   **Event Log (`src/events.rs`)**: Replayable event log using `std::sync::RwLock` for fast in-memory operations. Streams structured events (messages, thoughts, plans, tool calls, permissions, state changes) to the web UI.
+*   **Web UI (`src/web/`)**: An Axum-based web server that provides a structured activity view via WebSockets. It serves embedded static files and exposes a REST API for session control, follow-up prompts, and permission responses.
+*   **Configuration (`src/config/`)**: Centralized configuration handling using environment variables and CLI arguments. Supports per-agent callback policy and idle timeout.
 
 ## Building and Running
 
@@ -193,13 +192,15 @@ Configuration is handled via CLI arguments or Environment Variables.
 
 | Feature | CLI Argument | Environment Variable | Default |
 | :--- | :--- | :--- | :--- |
-| **Web Port** | `--port <PORT>` | `CCGO_PORT` | `8765` |
-| **Web Host** | `--host <HOST>` | `CCGO_HOST` | `127.0.0.1` |
-| **Auth Token** | `--auth-token <TOKEN>` | `CCGO_AUTH_TOKEN` | None |
-| **Agents** | `--agents <LIST>` | `CCGO_AGENTS` | `codex,gemini,opencode` |
-| **Timeout** | `--timeout <SEC>` | `CCGO_TIMEOUT` | `600` |
+| **Web Port** | `--port <PORT>` | `CCGONEXT_PORT` | `8765` |
+| **Web Host** | `--host <HOST>` | `CCGONEXT_HOST` | `127.0.0.1` |
+| **Auth Token** | `--auth-token <TOKEN>` | `CCGONEXT_AUTH_TOKEN` | None |
+| **Agents** | `--agents <LIST>` | `CCGONEXT_AGENTS` | `codex,gemini,opencode` |
+| **Timeout** | `--timeout <SEC>` | `CCGONEXT_TIMEOUT` | `600` |
+| **Idle Timeout** | `--idle-timeout <SEC>` | `CCGONEXT_IDLE_TIMEOUT` | `900` |
+| **Callback Policy** | `--callback-policy <POLICY>` | `CCGONEXT_CALLBACK_POLICY` | `auto-approve` |
 
-See `src/config/mod.rs` or run `ccgo --help` for the full list.
+See `src/config/mod.rs` or run `ccgonext --help` for the full list.
 
 ## Development Conventions
 
@@ -213,9 +214,10 @@ See `src/config/mod.rs` or run `ccgo --help` for the full list.
 
 *   `src/main.rs`: Application entry point, CLI parsing, and server startup.
 *   `src/lib.rs`: Public API exports.
-*   `src/mcp/protocol.rs`: JSON-RPC implementation for MCP.
-*   `src/agent/mod.rs`: The `Agent` trait definition.
-*   `src/session/mod.rs`: Logic for managing agent lifecycles.
+*   `src/acp/mod.rs`: ACP client with JSON-RPC over stdio, process lifecycle.
+*   `src/acp/callbacks.rs`: Callback handler (permissions, file I/O, terminals).
+*   `src/events.rs`: Replayable event log.
+*   `src/session/mod.rs`: AcpSession lifecycle and SessionManager registry.
 *   `src/web/handlers.rs`: REST API endpoints.
-*   `src/web/websocket.rs`: WebSocket handler for terminal streaming.
+*   `src/web/websocket.rs`: WebSocket event streaming.
 *   `Cargo.toml`: Project dependencies and metadata.

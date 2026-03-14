@@ -137,7 +137,7 @@ Upon seeing code, immediately make a three‑layer judgment:
 ---
 
 ## Project Structure & Module Organization
-- `src/` Rust source code. Core modules live in `agent/`, `mcp/`, `pty/`, `session/`, `web/`, `config/`, `log_provider/`, and `state/`.
+- `src/` Rust source code. Core modules live in `acp/`, `mcp/`, `session/`, `web/`, `config/`, and `state/`. `events.rs` provides the replayable event log.
 - `static/` web UI assets that are embedded into the binary at build time.
 - `scripts/` release and helper scripts (for example, macOS universal builds).
 - `npm/` npm shim package that downloads prebuilt binaries (`run.js`).
@@ -168,5 +168,5 @@ Upon seeing code, immediately make a three‑layer judgment:
 - If the web UI changes, note the UI impact and add screenshots when helpful.
 
 ## Configuration & Security
-- Runtime config uses `CCGO_*` environment variables (for example, `CCGO_PORT`, `CCGO_AUTH_TOKEN`).
+- Runtime config uses `CCGONEXT_*` environment variables (for example, `CCGONEXT_PORT`, `CCGONEXT_AUTH_TOKEN`).
 - Keep secrets out of the repo; use local env vars or shell exports for tokens.

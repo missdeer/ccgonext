@@ -32,7 +32,7 @@
 
 ## Project Overview
 
-CCGO (ClaudeCode-Codex-Gemini-OpenCode) is an MCP (Model Context Protocol) server that enables Claude Code to orchestrate multiple AI coding assistants (Codex, Gemini, OpenCode) through a unified interface. It runs as an MCP server over stdio while providing a web UI for real-time terminal monitoring.
+CCGO (ClaudeCode-Codex-Gemini-OpenCode) is an MCP (Model Context Protocol) server that enables Claude Code to orchestrate multiple AI coding assistants (Codex, Gemini, OpenCode) through a unified interface. It runs as an MCP server over stdio while providing a web UI for real-time activity monitoring.
 
 ## Build and Development Commands
 
@@ -70,44 +70,44 @@ src/
 ├── main.rs          # CLI entry point (clap), builds Config, launches servers
 ├── lib.rs           # Public module exports
 ├── config/          # Configuration structs (ServerConfig, AgentConfig, TimeoutConfig, WebConfig)
-├── agent/           # Agent trait and implementations (Codex, Gemini, OpenCode)
-│   └── mod.rs       # Agent trait: startup commands, ready patterns, sentinel injection
+├── acp/             # ACP (Agent Client Protocol) client over stdio
+│   ├── mod.rs       # AcpClient: JSON-RPC over stdin/stdout, request/response dispatch
+│   ├── callbacks.rs # CallbackHandler: permission, file I/O, terminal callbacks
+│   ├── process.rs   # AcpProcess: subprocess spawn and stdio pipe setup
+│   └── protocol.rs  # JSON-RPC message types, classification, serialization
 ├── session/         # Session management layer
-│   └── mod.rs       # AgentSession (per-agent state machine), SessionManager (registry)
-├── pty/             # PTY management (portable-pty)
-│   └── mod.rs       # PtyHandle (spawn, read/write, buffer), PtyManager (handle registry)
+│   └── mod.rs       # AcpSession (per-agent state machine), SessionManager (registry)
+├── events.rs        # Replayable event log with broadcast (std::sync locks)
 ├── mcp/             # MCP protocol implementation
 │   ├── mod.rs       # McpServer: stdio JSON-RPC (auto-detects JSONL vs LSP-style)
 │   ├── protocol.rs  # JSON-RPC types, MCP initialize/tools/call handlers
 │   └── tools.rs     # Tool definitions (ask_agents)
-├── state/           # Agent state machine (Stopped→Starting→Idle⇄Busy→Dead)
-├── log_provider/    # Log file watchers for detecting agent replies
-│   └── mod.rs       # LogProvider trait, file watching with debouncing
+├── state/           # Agent state machine (Stopped→Starting→Running, Idle⇄Prompting→Dead)
 └── web/             # Web UI and API (axum)
     ├── mod.rs       # WebServer, routes (/api/*, /ws/*)
     ├── handlers.rs  # REST API handlers
-    ├── websocket.rs # WebSocket terminal I/O
-    ├── static_files.rs  # Embedded static files (rust-embed)
-    └── auth.rs      # Optional auth token middleware
+    ├── websocket.rs # WebSocket event streaming
+    └── static_files.rs  # Embedded static files (rust-embed)
 ```
 
 ### Key Data Flow
 
-1. **MCP Request** → `McpServer::handle_tools_call` → `execute_tool("ask_agents", ...)` → `SessionManager::get(agent)` → `AgentSession::ask()`
-2. **AgentSession::ask** → auto-starts agent if stopped → queues request → sends to PTY with sentinel → waits for LogProvider to detect reply
-3. **Reply Detection** → LogProvider watches agent log files → parses assistant responses → delivers via oneshot channel
+1. **MCP Request** → `McpServer::handle_tools_call` → `execute_tool("ask_agents", ...)` → `SessionManager::get_or_create(agent, cwd)` → `AcpSession::ask()`
+2. **AcpSession::ask** → auto-starts ACP subprocess if stopped → sends prompt via JSON-RPC → waits for response with timeout
+3. **Structured Events** → ACP session/update notifications → EventLog → broadcast to WebSocket subscribers
 
 ### Agent State Machine
 
-`Stopped` → (StartAgent) → `Starting` → (ReadyDetected) → `Idle` ⇄ (AskAgent/ReplyReceived) → `Busy`
-Any running state → (StopAgent/ProcessDied) → `Dead`
+`Stopped` → (ensure_running) → `Starting` → `Running` + `Idle` ⇄ (ask/response) → `Prompting`
+Any running state → (shutdown/process died/timeout) → `Dead`
 
-### PTY Layer
+### ACP Layer
 
-Uses `portable-pty` for cross-platform PTY support (ConPTY on Windows, native TTY on Unix). Each agent gets its own PTY with:
-- Ring buffer for terminal output history
-- Broadcast channel for WebSocket streaming
-- Graceful shutdown with process cleanup
+Uses ACP (Agent Client Protocol) over stdio for structured agent communication. Each agent gets its own subprocess with:
+- JSON-RPC request/response dispatch with pending map
+- Callback handling (permissions, file read/write, terminal create/kill/wait)
+- Configurable callback policy (deny-all, read-only, ask, auto-approve)
+- Idle timeout with automatic reaping (default 900s, configurable via --idle-timeout)
 
 ## MCP Tool
 
@@ -116,6 +116,7 @@ Single tool exposed: `ask_agents`
   - `agent`: "codex" | "gemini" | "opencode" | "claudecode"
   - `message`: Prompt to send
 - `timeout`: Optional seconds (default: 600, max: 1800)
+- `project_root_path`: Optional working directory (defaults to process cwd)
 
 Returns JSON: `{"results": [{"agent": "...", "success": true/false, "response": "...", "error": "..."}]}`
 
