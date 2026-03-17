@@ -80,13 +80,18 @@ fn validate_args(args: &AskAgentsArgs) -> Result<(), anyhow::Error> {
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
         name: "ask_agents".to_string(),
-        description: "Send messages to AI agents in parallel and wait for responses. Agents are auto-started if not running.".to_string(),
+        description: concat!(
+            "Send prompts to AI coding agents (Codex CLI, Gemini CLI, OpenCode, Claude Code) in parallel and collect their responses. ",
+            "Each agent runs as a cached subprocess (auto-started on first use, reaped after idle timeout). ",
+            "Use this to get a second opinion, run parallel code reviews, delegate repo analysis, or cross-validate solutions across multiple AI models. ",
+            "Returns JSON with each agent's response or error. Each agent must be unique per call.",
+        ).to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "requests": {
                     "type": "array",
-                    "description": "Agent requests (1-4 items)",
+                    "description": "List of agent requests to execute in parallel (1-4 items). Each request targets one unique agent with a prompt.",
                     "minItems": 1,
                     "maxItems": 4,
                     "items": {
@@ -95,11 +100,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                             "agent": {
                                 "type": "string",
                                 "enum": ["codex", "gemini", "opencode", "claudecode"],
-                                "description": "Name of the agent"
+                                "description": "Target agent. codex=Codex CLI, gemini=Gemini CLI, opencode=OpenCode, claudecode=Claude Code."
                             },
                             "message": {
                                 "type": "string",
-                                "description": "Message to send to the agent"
+                                "description": "The prompt or question to send to the agent. Agents receive this as a new conversation turn."
                             }
                         },
                         "required": ["agent", "message"]
@@ -107,11 +112,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 600, max: 1800)"
+                    "description": "Per-agent timeout in seconds (default: 600, max: 1800). Each agent enforces this limit independently."
                 },
                 "project_root_path": {
                     "type": "string",
-                    "description": "Project root directory path. Defaults to the process working directory if not provided."
+                    "description": "Path to the project root directory. Agents use this as their working directory. Defaults to the MCP server's working directory if omitted."
                 }
             },
             "required": ["requests"]

@@ -3,10 +3,10 @@ name = "ccgonext"
 version = "0.1.5"
 edition = "2021"
 authors = ["missdeer"]
-description = "ClaudeCode-Codex-Gemini-OpenCode Next MCP Server - Multi-AI collaboration bridge"
+description = "MCP server orchestrating AI coding agents (Codex, Gemini, OpenCode, Claude) for parallel multi-agent queries over stdio"
 license = "GPL-3.0-only OR LicenseRef-Commercial"
 repository = "https://github.com/missdeer/ccgonext"
-keywords = ["mcp", "ai", "claude", "codex", "gemini"]
+keywords = ["mcp", "agent", "orchestrator", "claude", "codex"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
