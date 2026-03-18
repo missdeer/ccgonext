@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "ccgonext"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",

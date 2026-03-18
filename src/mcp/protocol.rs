@@ -241,7 +241,7 @@ mod tests {
             capabilities: ServerCapabilities { tools: None },
             server_info: ServerInfo {
                 name: "ccgonext".to_string(),
-                version: "0.1.5".to_string(),
+                version: "0.2.0".to_string(),
             },
         };
 

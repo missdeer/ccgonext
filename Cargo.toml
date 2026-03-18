@@ -1,6 +1,6 @@
 [package]
 name = "ccgonext"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 authors = ["missdeer"]
 description = "MCP server orchestrating AI coding agents (Codex, Gemini, OpenCode, Claude) for parallel multi-agent queries over stdio"

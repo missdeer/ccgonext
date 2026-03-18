@@ -157,7 +157,7 @@ impl AcpClient {
 
     pub async fn initialize(&self, _cwd: &Path) -> anyhow::Result<InitializeResponse> {
         let req = InitializeRequest::new(ProtocolVersion::LATEST).client_info(
-            agent_client_protocol_schema::Implementation::new("ccgonext", "0.1.5"),
+            agent_client_protocol_schema::Implementation::new("ccgonext", "0.2.0"),
         );
         let result = self.send_request("initialize", req).await?;
         Ok(serde_json::from_value(result)?)

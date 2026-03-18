@@ -1,6 +1,6 @@
 {
   "name": "@ccgonext/darwin-universal",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Platform-specific binary for ccgonext (macOS Universal)",
   "license": "MIT",
   "repository": {
