@@ -1,11 +1,15 @@
+use process_wrap::tokio::{KillOnDrop, TokioChildWrapper, TokioCommandWrap};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
 
 pub struct AcpProcess {
-    pub child: Child,
+    pub child: Box<dyn TokioChildWrapper>,
     pub stdin: ChildStdin,
     pub stdout: BufReader<ChildStdout>,
     pub stderr: ChildStderr,
@@ -27,23 +31,37 @@ impl AcpProcess {
             c.args(args);
             c
         };
+
         cmd.current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
 
         for (k, v) in env_vars {
             cmd.env(k, v);
         }
 
-        let mut child = cmd
+        let mut wrap = TokioCommandWrap::from(cmd);
+        #[cfg(windows)]
+        wrap.wrap(JobObject);
+        wrap.wrap(KillOnDrop);
+
+        let mut child = wrap
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn ACP agent '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
+        let stdin = child
+            .stdin()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("stdin not piped"))?;
+        let stdout = child
+            .stdout()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("stdout not piped"))?;
+        let stderr = child
+            .stderr()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
 
         Ok(Self {
             child,
@@ -54,7 +72,7 @@ impl AcpProcess {
     }
 
     pub async fn kill(&mut self) {
-        let _ = self.child.kill().await;
+        let _ = Box::into_pin(self.child.kill()).await;
     }
 }
 

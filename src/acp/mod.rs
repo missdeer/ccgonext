@@ -36,9 +36,10 @@ pub struct AcpClient {
     writer_tx: mpsc::Sender<WriterMsg>,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<ResponseResult>>>>,
     next_id: AtomicI64,
-    reader_handle: JoinHandle<()>,
-    wait_handle: JoinHandle<()>,
-    stderr_handle: JoinHandle<()>,
+    reader_handle: Mutex<Option<JoinHandle<()>>>,
+    wait_handle: Mutex<Option<JoinHandle<()>>>,
+    stderr_handle: Mutex<Option<JoinHandle<()>>>,
+    child: Arc<Mutex<Option<Box<dyn process_wrap::tokio::TokioChildWrapper>>>>,
     callback_handler: Arc<CallbackHandler>,
     connected: Arc<AtomicBool>,
 }
@@ -85,7 +86,8 @@ impl AcpClient {
             agent_name,
         ));
 
-        let wait_handle = tokio::spawn(wait_task(proc.child, connected.clone()));
+        let child = Arc::new(Mutex::new(Some(proc.child)));
+        let wait_handle = tokio::spawn(wait_task(child.clone(), connected.clone()));
 
         // Keep writer_handle alive so the task is not dropped
         tokio::spawn(async move {
@@ -96,9 +98,10 @@ impl AcpClient {
             writer_tx,
             pending,
             next_id: AtomicI64::new(1),
-            reader_handle,
-            wait_handle,
-            stderr_handle,
+            reader_handle: Mutex::new(Some(reader_handle)),
+            wait_handle: Mutex::new(Some(wait_handle)),
+            stderr_handle: Mutex::new(Some(stderr_handle)),
+            child,
             callback_handler,
             connected,
         })
@@ -198,10 +201,39 @@ impl AcpClient {
     pub async fn shutdown(&self) {
         self.callback_handler.shutdown().await;
         self.connected.store(false, Ordering::SeqCst);
-        self.reader_handle.abort();
-        self.stderr_handle.abort();
-        self.wait_handle.abort();
+        let reader = self.reader_handle.lock().await.take();
+        let stderr = self.stderr_handle.lock().await.take();
+        let wait = self.wait_handle.lock().await.take();
+        if let Some(h) = &reader {
+            h.abort();
+        }
+        if let Some(h) = &stderr {
+            h.abort();
+        }
+        if let Some(h) = &wait {
+            h.abort();
+        }
         let _ = self.writer_tx.send(WriterMsg::Shutdown).await;
+        if let Some(h) = wait {
+            let _ = h.await;
+        }
+        let taken_child = self.child.lock().await.take();
+        if let Some(mut c) = taken_child {
+            let _ = c.start_kill();
+            let handle = tokio::runtime::Handle::current();
+            let _ = tokio::task::spawn_blocking(move || {
+                handle.block_on(async move {
+                    let _ = Box::into_pin(c.wait()).await;
+                });
+            })
+            .await;
+        }
+        if let Some(h) = reader {
+            let _ = h.await;
+        }
+        if let Some(h) = stderr {
+            let _ = h.await;
+        }
         fail_pending_requests(&self.pending, "ACP client shutdown".to_string()).await;
     }
 }
@@ -521,8 +553,21 @@ fn format_tool_call_output(
     })
 }
 
-async fn wait_task(mut child: tokio::process::Child, connected: Arc<AtomicBool>) {
-    let _ = child.wait().await;
+async fn wait_task(
+    child: Arc<Mutex<Option<Box<dyn process_wrap::tokio::TokioChildWrapper>>>>,
+    connected: Arc<AtomicBool>,
+) {
+    loop {
+        {
+            let mut guard = child.lock().await;
+            let Some(c) = guard.as_mut() else { break };
+            match c.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {}
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     connected.store(false, Ordering::SeqCst);
 }
 
