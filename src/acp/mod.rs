@@ -26,6 +26,7 @@ use self::protocol::{
 };
 
 type ResponseResult = anyhow::Result<serde_json::Value>;
+type SharedChild = Arc<Mutex<Option<Box<dyn process_wrap::tokio::TokioChildWrapper>>>>;
 
 enum WriterMsg {
     Line(String),
@@ -39,7 +40,7 @@ pub struct AcpClient {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     wait_handle: Mutex<Option<JoinHandle<()>>>,
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
-    child: Arc<Mutex<Option<Box<dyn process_wrap::tokio::TokioChildWrapper>>>>,
+    child: SharedChild,
     callback_handler: Arc<CallbackHandler>,
     connected: Arc<AtomicBool>,
 }
@@ -71,7 +72,14 @@ impl AcpClient {
             cwd.to_path_buf(),
         ));
 
-        let writer_handle = tokio::spawn(writer_task(proc.stdin, writer_rx, connected.clone()));
+        let child = Arc::new(Mutex::new(Some(proc.child)));
+
+        let writer_handle = tokio::spawn(writer_task(
+            proc.stdin,
+            writer_rx,
+            connected.clone(),
+            child.clone(),
+        ));
 
         let stderr_handle = tokio::spawn(drain_stderr(proc.stderr, agent_name.clone()));
 
@@ -81,12 +89,12 @@ impl AcpClient {
             connected.clone(),
             callback_handler.clone(),
             writer_tx.clone(),
+            child.clone(),
             event_log.clone(),
             session_id,
             agent_name,
         ));
 
-        let child = Arc::new(Mutex::new(Some(proc.child)));
         let wait_handle = tokio::spawn(wait_task(child.clone(), connected.clone()));
 
         // Keep writer_handle alive so the task is not dropped
@@ -217,17 +225,7 @@ impl AcpClient {
         if let Some(h) = wait {
             let _ = h.await;
         }
-        let taken_child = self.child.lock().await.take();
-        if let Some(mut c) = taken_child {
-            let _ = c.start_kill();
-            let handle = tokio::runtime::Handle::current();
-            let _ = tokio::task::spawn_blocking(move || {
-                handle.block_on(async move {
-                    let _ = Box::into_pin(c.wait()).await;
-                });
-            })
-            .await;
-        }
+        kill_child(&self.child).await;
         if let Some(h) = reader {
             let _ = h.await;
         }
@@ -252,15 +250,19 @@ async fn writer_task(
     mut stdin: tokio::process::ChildStdin,
     mut rx: mpsc::Receiver<WriterMsg>,
     connected: Arc<AtomicBool>,
+    child: SharedChild,
 ) {
+    let mut needs_child_cleanup = false;
     while let Some(msg) = rx.recv().await {
         match msg {
             WriterMsg::Line(line) => {
                 let data = format!("{}\n", line);
                 if stdin.write_all(data.as_bytes()).await.is_err() {
+                    needs_child_cleanup = true;
                     break;
                 }
                 if stdin.flush().await.is_err() {
+                    needs_child_cleanup = true;
                     break;
                 }
             }
@@ -272,6 +274,9 @@ async fn writer_task(
     }
 
     connected.store(false, Ordering::SeqCst);
+    if needs_child_cleanup {
+        kill_child(&child).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,6 +286,7 @@ async fn reader_task(
     connected: Arc<AtomicBool>,
     callback_handler: Arc<CallbackHandler>,
     writer_tx: mpsc::Sender<WriterMsg>,
+    child: SharedChild,
     event_log: Arc<EventLog>,
     session_id: String,
     agent_name: String,
@@ -376,6 +382,7 @@ async fn reader_task(
     }
 
     connected.store(false, Ordering::SeqCst);
+    kill_child(&child).await;
     fail_pending_requests(
         &pending,
         format!("ACP agent connection closed for {}", agent_name),
@@ -553,10 +560,7 @@ fn format_tool_call_output(
     })
 }
 
-async fn wait_task(
-    child: Arc<Mutex<Option<Box<dyn process_wrap::tokio::TokioChildWrapper>>>>,
-    connected: Arc<AtomicBool>,
-) {
+async fn wait_task(child: SharedChild, connected: Arc<AtomicBool>) {
     loop {
         {
             let mut guard = child.lock().await;
@@ -569,6 +573,21 @@ async fn wait_task(
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     connected.store(false, Ordering::SeqCst);
+    kill_child(&child).await;
+}
+
+async fn kill_child(child: &SharedChild) {
+    let taken_child = child.lock().await.take();
+    if let Some(mut c) = taken_child {
+        let _ = c.start_kill();
+        let handle = tokio::runtime::Handle::current();
+        let _ = tokio::task::spawn_blocking(move || {
+            handle.block_on(async move {
+                let _ = Box::into_pin(c.wait()).await;
+            });
+        })
+        .await;
+    }
 }
 
 #[cfg(test)]

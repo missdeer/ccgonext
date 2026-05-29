@@ -531,6 +531,86 @@ async fn test_session_shutdown_kills_grandchildren() {
 }
 
 #[cfg(windows)]
+#[tokio::test]
+async fn test_acp_exit_reaps_process_tree_without_session_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-exit-after-prompt.ps1");
+    std::fs::write(&script_path, fake_acp_exit_after_prompt_script()).unwrap();
+    let pid_file = temp.path().join("grandchild-pid.txt");
+    let self_pid_file = temp.path().join("self-pid.txt");
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
+
+    session
+        .ask("hello".to_string(), Some(Duration::from_secs(5)))
+        .await
+        .expect("ask should receive the final fake-acp response");
+
+    let mut grandchild_pid: Option<u32> = None;
+    let mut fake_acp_pid: Option<u32> = None;
+    for _ in 0..30 {
+        if grandchild_pid.is_none() {
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    grandchild_pid = Some(pid);
+                }
+            }
+        }
+        if fake_acp_pid.is_none() {
+            if let Ok(content) = std::fs::read_to_string(&self_pid_file) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    fake_acp_pid = Some(pid);
+                }
+            }
+        }
+        if grandchild_pid.is_some() && fake_acp_pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let grandchild_pid = grandchild_pid.expect("grandchild PID was never written");
+    let fake_acp_pid = fake_acp_pid.expect("fake-acp PID was never written");
+
+    let mut grandchild_died_at: Option<u32> = None;
+    for tick in 0..60 {
+        if !is_process_alive(grandchild_pid) {
+            grandchild_died_at = Some(tick);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if grandchild_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &grandchild_pid.to_string()])
+            .output();
+    }
+
+    assert!(
+        grandchild_died_at.is_some(),
+        "grandchild PID {} survived after fake-acp PID {} exited without explicit session shutdown",
+        grandchild_pid,
+        fake_acp_pid
+    );
+}
+
+#[cfg(windows)]
 fn is_process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
@@ -617,6 +697,66 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         }
         [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
         continue
+    }
+}
+"#
+}
+
+#[cfg(windows)]
+fn fake_acp_exit_after_prompt_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'powershell'
+$psi.Arguments = '-NoProfile -Command "Start-Sleep -Seconds 120"'
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$grandchild = [System.Diagnostics.Process]::Start($psi)
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Content -Path (Join-Path $dir 'grandchild-pid.txt') -Value $grandchild.Id
+Set-Content -Path (Join-Path $dir 'self-pid.txt') -Value $PID
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.method -eq 'initialize') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        [Console]::Out.Flush()
+        continue
+    }
+    if ($msg.method -eq 'session/new') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                sessionId = 'fake-session'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        [Console]::Out.Flush()
+        continue
+    }
+    if ($msg.method -eq 'session/prompt') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                stopReason = 'end_turn'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        [Console]::Out.Flush()
+        exit 0
     }
 }
 "#
