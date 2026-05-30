@@ -532,6 +532,100 @@ async fn test_session_shutdown_kills_grandchildren() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn test_dropping_session_kills_process_tree_without_explicit_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-grandchild-drop.ps1");
+    std::fs::write(&script_path, fake_acp_grandchild_script()).unwrap();
+    let pid_file = temp.path().join("grandchild-pid.txt");
+    let self_pid_file = temp.path().join("self-pid.txt");
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
+
+    session
+        .ask("hello".to_string(), Some(Duration::from_secs(5)))
+        .await
+        .expect("ask should succeed against fake acp");
+
+    let mut grandchild_pid: Option<u32> = None;
+    let mut fake_acp_pid: Option<u32> = None;
+    for _ in 0..30 {
+        if grandchild_pid.is_none() {
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    grandchild_pid = Some(pid);
+                }
+            }
+        }
+        if fake_acp_pid.is_none() {
+            if let Ok(content) = std::fs::read_to_string(&self_pid_file) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    fake_acp_pid = Some(pid);
+                }
+            }
+        }
+        if grandchild_pid.is_some() && fake_acp_pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let grandchild_pid = grandchild_pid.expect("grandchild PID was never written");
+    let fake_acp_pid = fake_acp_pid.expect("fake-acp PID was never written");
+
+    assert!(
+        is_process_alive(grandchild_pid),
+        "grandchild PID {} should be alive immediately after spawn",
+        grandchild_pid
+    );
+
+    drop(mgr);
+    drop(session);
+
+    let mut grandchild_died_at: Option<u32> = None;
+    for tick in 0..60 {
+        if !is_process_alive(grandchild_pid) {
+            grandchild_died_at = Some(tick);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if grandchild_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &grandchild_pid.to_string()])
+            .output();
+    }
+    if is_process_alive(fake_acp_pid) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &fake_acp_pid.to_string()])
+            .output();
+    }
+
+    assert!(
+        grandchild_died_at.is_some(),
+        "grandchild PID {} survived after dropping session without explicit shutdown (fake-acp PID {})",
+        grandchild_pid,
+        fake_acp_pid
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn test_acp_exit_reaps_process_tree_without_session_shutdown() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake-acp-exit-after-prompt.ps1");

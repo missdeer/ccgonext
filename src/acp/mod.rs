@@ -236,6 +236,23 @@ impl AcpClient {
     }
 }
 
+impl Drop for AcpClient {
+    fn drop(&mut self) {
+        self.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut child) = self.child.try_lock() {
+            if let Some(c) = child.as_mut() {
+                let _ = c.start_kill();
+            }
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let child = self.child.clone();
+            handle.spawn(async move {
+                kill_child(&child).await;
+            });
+        }
+    }
+}
+
 async fn fail_pending_requests(
     pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<ResponseResult>>>>,
     message: String,
@@ -582,9 +599,14 @@ async fn kill_child(child: &SharedChild) {
         let _ = c.start_kill();
         let handle = tokio::runtime::Handle::current();
         let _ = tokio::task::spawn_blocking(move || {
-            handle.block_on(async move {
-                let _ = Box::into_pin(c.wait()).await;
+            let timed_out = handle.block_on(async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), Box::into_pin(c.wait()))
+                    .await
+                    .is_err()
             });
+            if timed_out {
+                tracing::warn!("Timed out waiting for ACP process tree to exit after kill");
+            }
         })
         .await;
     }
