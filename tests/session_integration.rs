@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn test_session_manager_get_or_create() {
@@ -424,6 +426,197 @@ async fn test_ask_agents_reports_timeout_in_result() {
         "MCP timeout returned too late: {:?}",
         elapsed
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_mcp_stdio_exit_kills_acp_process_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-grandchild-server-exit.ps1");
+    std::fs::write(&script_path, fake_acp_grandchild_script()).unwrap();
+    let shim_path = temp.path().join("fake-acp.cmd");
+    std::fs::write(
+        &shim_path,
+        "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-grandchild-server-exit.ps1\"\r\n",
+    )
+    .unwrap();
+    let pid_file = temp.path().join("grandchild-pid.txt");
+    let self_pid_file = temp.path().join("self-pid.txt");
+
+    let acp_command = shim_path.to_string_lossy().to_string();
+
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_ccgonext"))
+        .arg("--agents")
+        .arg("codex")
+        .arg("--codex-cmd")
+        .arg(acp_command)
+        .arg("--port")
+        .arg("0")
+        .arg("serve")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("failed to spawn ccgonext test server");
+
+    let mut stdin = server.stdin.take().expect("server stdin should be piped");
+    let stdout = server.stdout.take().expect("server stdout should be piped");
+    let stderr = server.stderr.take().expect("server stderr should be piped");
+    let mut stdout = tokio::io::BufReader::new(stdout);
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = stderr;
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output).await;
+        output
+    });
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "ask_agents",
+            "arguments": {
+                "requests": [{"agent": "codex", "message": "hello"}],
+                "timeout": 5,
+                "project_root_path": temp.path().to_string_lossy(),
+            }
+        }
+    });
+    stdin
+        .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+        .await
+        .unwrap();
+    stdin.write_all(b"\n").await.unwrap();
+    stdin.flush().await.unwrap();
+
+    let mut response_line = String::new();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(15),
+        stdout.read_line(&mut response_line),
+    )
+    .await
+    .expect("timed out waiting for MCP response")
+    .expect("failed to read MCP response");
+    assert!(bytes > 0, "ccgonext exited before writing MCP response");
+    let response: serde_json::Value = serde_json::from_str(response_line.trim()).unwrap();
+    assert_eq!(response["id"], 1);
+    if response.get("error").is_some() {
+        let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+        panic!(
+            "MCP request failed before fake ACP could start: response={}, stderr={}",
+            response_line.trim(),
+            stderr
+        );
+    }
+
+    let tool_text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let tool_response: serde_json::Value = serde_json::from_str(tool_text).unwrap_or_default();
+    if tool_response["results"][0]["success"] != true {
+        let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+        panic!(
+            "ask_agents failed before fake ACP could start: response={}, stderr={}",
+            tool_text, stderr
+        );
+    }
+
+    let grandchild_pid = match wait_for_pid_file(&pid_file).await {
+        Some(pid) => pid,
+        None => {
+            let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+            panic!(
+                "grandchild PID was never written; response={}, stderr={}",
+                tool_text, stderr
+            );
+        }
+    };
+    let fake_acp_pid = match wait_for_pid_file(&self_pid_file).await {
+        Some(pid) => pid,
+        None => {
+            let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+            panic!(
+                "fake-acp PID was never written; response={}, stderr={}",
+                tool_text, stderr
+            );
+        }
+    };
+    assert!(
+        is_process_alive(grandchild_pid),
+        "grandchild PID {} should be alive before server exit",
+        grandchild_pid
+    );
+
+    let (status, _stderr) = stop_test_server(server, stdin, stderr_task).await;
+    let status = status.unwrap_or_else(|| panic!("ccgonext server did not exit after stdin EOF"));
+    assert!(status.success(), "ccgonext exited with {}", status);
+
+    let mut fake_acp_died_at: Option<u32> = None;
+    let mut grandchild_died_at: Option<u32> = None;
+    for tick in 0..60 {
+        if fake_acp_died_at.is_none() && !is_process_alive(fake_acp_pid) {
+            fake_acp_died_at = Some(tick);
+        }
+        if grandchild_died_at.is_none() && !is_process_alive(grandchild_pid) {
+            grandchild_died_at = Some(tick);
+        }
+        if fake_acp_died_at.is_some() && grandchild_died_at.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if fake_acp_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &fake_acp_pid.to_string()])
+            .output();
+    }
+    if grandchild_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &grandchild_pid.to_string()])
+            .output();
+    }
+
+    assert!(
+        fake_acp_died_at.is_some(),
+        "fake-acp PID {} survived after ccgonext stdio exit",
+        fake_acp_pid
+    );
+    assert!(
+        grandchild_died_at.is_some(),
+        "grandchild PID {} survived after ccgonext stdio exit (fake-acp PID {} died at tick {:?})",
+        grandchild_pid,
+        fake_acp_pid,
+        fake_acp_died_at
+    );
+}
+
+#[cfg(windows)]
+async fn stop_test_server(
+    mut server: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stderr_task: tokio::task::JoinHandle<String>,
+) -> (Option<std::process::ExitStatus>, String) {
+    drop(stdin);
+
+    let status = match tokio::time::timeout(Duration::from_secs(15), server.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            let _ = server.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(5), server.wait()).await;
+            None
+        }
+    };
+
+    let stderr = match tokio::time::timeout(Duration::from_secs(5), stderr_task).await {
+        Ok(Ok(output)) => output,
+        _ => String::new(),
+    };
+
+    (status, stderr)
 }
 
 #[cfg(windows)]

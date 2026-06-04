@@ -264,17 +264,9 @@ fn build_config(cli: &Cli) -> Config {
 async fn run_mcp_server(config: Arc<Config>, port_retry: u16) -> anyhow::Result<()> {
     let session_manager = create_session_manager(&config);
 
-    let shutdown_manager = session_manager.clone();
-    let shutdown_handle = tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        tracing::info!("Received shutdown signal, cleaning up...");
-        shutdown_manager.shutdown_all().await;
-        tracing::info!("Cleanup complete");
-    });
-
     let web_config = config.clone();
     let web_session_manager = session_manager.clone();
-    tokio::spawn(async move {
+    let web_handle = tokio::spawn(async move {
         let web_server = WebServer::new(web_session_manager, web_config);
         let options = WebServerRunOptions {
             port_retry,
@@ -286,10 +278,18 @@ async fn run_mcp_server(config: Arc<Config>, port_retry: u16) -> anyhow::Result<
     });
 
     let mcp_server = McpServer::new(session_manager.clone(), config);
-    let result = mcp_server.run_stdio().await;
+    let result = tokio::select! {
+        result = mcp_server.run_stdio() => result,
+        _ = wait_for_shutdown_signal() => {
+            tracing::info!("Received shutdown signal");
+            Ok::<(), anyhow::Error>(())
+        }
+    };
 
+    tracing::info!("Cleaning up sessions...");
     session_manager.shutdown_all().await;
-    shutdown_handle.abort();
+    web_handle.abort();
+    tracing::info!("Cleanup complete");
 
     result
 }
@@ -300,23 +300,26 @@ async fn run_web_server(
     open_browser: bool,
 ) -> anyhow::Result<()> {
     let session_manager = create_session_manager(&config);
-
     let shutdown_manager = session_manager.clone();
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        tracing::info!("Received shutdown signal, cleaning up...");
-        shutdown_manager.shutdown_all().await;
-        tracing::info!("Cleanup complete");
-        std::process::exit(0);
-    });
 
     let web_server = WebServer::new(session_manager, config);
     let options = WebServerRunOptions {
         port_retry,
         open_browser,
     };
-    web_server.run_with_options(options).await?;
-    Ok(())
+    let result = tokio::select! {
+        result = web_server.run_with_options(options) => result,
+        _ = wait_for_shutdown_signal() => {
+            tracing::info!("Received shutdown signal");
+            Ok::<(), anyhow::Error>(())
+        }
+    };
+
+    tracing::info!("Cleaning up sessions...");
+    shutdown_manager.shutdown_all().await;
+    tracing::info!("Cleanup complete");
+
+    result
 }
 
 async fn wait_for_shutdown_signal() {

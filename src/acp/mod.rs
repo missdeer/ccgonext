@@ -211,11 +211,13 @@ impl AcpClient {
     pub async fn shutdown(&self) {
         self.callback_handler.shutdown().await;
         self.connected.store(false, Ordering::SeqCst);
+        let _ = self.writer_tx.try_send(WriterMsg::Shutdown);
+        kill_child(&self.child).await;
+
         let writer = self.writer_handle.lock().await.take();
         let reader = self.reader_handle.lock().await.take();
         let stderr = self.stderr_handle.lock().await.take();
         let wait = self.wait_handle.lock().await.take();
-        let _ = self.writer_tx.try_send(WriterMsg::Shutdown);
         if let Some(h) = &writer {
             h.abort();
         }
@@ -269,7 +271,7 @@ impl Drop for AcpClient {
             }
         }
         if let Ok(mut child) = self.child.try_lock() {
-            if let Some(c) = child.as_mut() {
+            if let Some(mut c) = child.take() {
                 let _ = c.start_kill();
             }
         }
