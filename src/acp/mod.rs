@@ -37,6 +37,7 @@ pub struct AcpClient {
     writer_tx: mpsc::Sender<WriterMsg>,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<ResponseResult>>>>,
     next_id: AtomicI64,
+    writer_handle: Mutex<Option<JoinHandle<()>>>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     wait_handle: Mutex<Option<JoinHandle<()>>>,
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
@@ -97,15 +98,11 @@ impl AcpClient {
 
         let wait_handle = tokio::spawn(wait_task(child.clone(), connected.clone()));
 
-        // Keep writer_handle alive so the task is not dropped
-        tokio::spawn(async move {
-            let _ = writer_handle.await;
-        });
-
         Ok(Self {
             writer_tx,
             pending,
             next_id: AtomicI64::new(1),
+            writer_handle: Mutex::new(Some(writer_handle)),
             reader_handle: Mutex::new(Some(reader_handle)),
             wait_handle: Mutex::new(Some(wait_handle)),
             stderr_handle: Mutex::new(Some(stderr_handle)),
@@ -206,12 +203,22 @@ impl AcpClient {
         self.connected.load(Ordering::SeqCst)
     }
 
+    pub async fn terminate(&self) {
+        self.connected.store(false, Ordering::SeqCst);
+        start_kill_child(&self.child).await;
+    }
+
     pub async fn shutdown(&self) {
         self.callback_handler.shutdown().await;
         self.connected.store(false, Ordering::SeqCst);
+        let writer = self.writer_handle.lock().await.take();
         let reader = self.reader_handle.lock().await.take();
         let stderr = self.stderr_handle.lock().await.take();
         let wait = self.wait_handle.lock().await.take();
+        let _ = self.writer_tx.try_send(WriterMsg::Shutdown);
+        if let Some(h) = &writer {
+            h.abort();
+        }
         if let Some(h) = &reader {
             h.abort();
         }
@@ -221,11 +228,13 @@ impl AcpClient {
         if let Some(h) = &wait {
             h.abort();
         }
-        let _ = self.writer_tx.send(WriterMsg::Shutdown).await;
         if let Some(h) = wait {
             let _ = h.await;
         }
         kill_child(&self.child).await;
+        if let Some(h) = writer {
+            let _ = h.await;
+        }
         if let Some(h) = reader {
             let _ = h.await;
         }
@@ -239,17 +248,38 @@ impl AcpClient {
 impl Drop for AcpClient {
     fn drop(&mut self) {
         self.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut handle) = self.writer_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.stderr_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.wait_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
         if let Ok(mut child) = self.child.try_lock() {
             if let Some(c) = child.as_mut() {
                 let _ = c.start_kill();
             }
         }
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let child = self.child.clone();
-            handle.spawn(async move {
-                kill_child(&child).await;
-            });
-        }
+    }
+}
+
+async fn start_kill_child(child: &SharedChild) {
+    let mut guard = child.lock().await;
+    if let Some(c) = guard.as_mut() {
+        let _ = c.start_kill();
     }
 }
 
@@ -597,15 +627,17 @@ async fn kill_child(child: &SharedChild) {
     let taken_child = child.lock().await.take();
     if let Some(mut c) = taken_child {
         let _ = c.start_kill();
-        let handle = tokio::runtime::Handle::current();
         let _ = tokio::task::spawn_blocking(move || {
-            let timed_out = handle.block_on(async move {
-                tokio::time::timeout(std::time::Duration::from_secs(5), Box::into_pin(c.wait()))
-                    .await
-                    .is_err()
-            });
-            if timed_out {
-                tracing::warn!("Timed out waiting for ACP process tree to exit after kill");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match c.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        tracing::warn!("Timed out waiting for ACP process tree to exit after kill");
+                        return;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                }
             }
         })
         .await;

@@ -199,6 +199,7 @@ async fn test_session_timeout_returns_promptly() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake-acp.ps1");
     std::fs::write(&script_path, fake_acp_timeout_script()).unwrap();
+    let prompt_file = temp.path().join("prompt-started.txt");
 
     let mut configs = HashMap::new();
     configs.insert(
@@ -218,10 +219,18 @@ async fn test_session_timeout_returns_promptly() {
     let mgr = SessionManager::new(configs, event_log);
     let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
 
+    let session_for_task = session.clone();
+    let ask_handle = tokio::spawn(async move {
+        session_for_task
+            .ask("slow request".to_string(), Some(Duration::from_secs(1)))
+            .await
+    });
+    assert!(
+        wait_for_file(&prompt_file).await,
+        "fake ACP never received session/prompt"
+    );
     let started = Instant::now();
-    let result = session
-        .ask("slow request".to_string(), Some(Duration::from_secs(1)))
-        .await;
+    let result = ask_handle.await.unwrap();
     let elapsed = started.elapsed();
 
     assert!(result.is_err());
@@ -233,6 +242,86 @@ async fn test_session_timeout_returns_promptly() {
     );
     assert_eq!(session.process_state().await, ProcessState::Dead);
     assert_eq!(session.turn_state().await, TurnState::Idle);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_session_timeout_kills_acp_process_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake-acp-timeout-grandchild.ps1");
+    std::fs::write(&script_path, fake_acp_timeout_grandchild_script()).unwrap();
+    let pid_file = temp.path().join("grandchild-pid.txt");
+    let self_pid_file = temp.path().join("self-pid.txt");
+
+    let mut configs = HashMap::new();
+    configs.insert(
+        "codex".to_string(),
+        AgentConfig::codex_default()
+            .with_command("powershell".to_string())
+            .with_args(vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+            ]),
+    );
+
+    let event_log = Arc::new(EventLog::new(100));
+    let mgr = SessionManager::new(configs, event_log);
+    let session = mgr.get_or_create("codex", temp.path()).await.unwrap();
+
+    let result = session
+        .ask("slow request".to_string(), Some(Duration::from_secs(1)))
+        .await;
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().to_string(), "Request timed out");
+
+    let grandchild_pid = wait_for_pid_file(&pid_file)
+        .await
+        .expect("grandchild PID was never written");
+    let fake_acp_pid = wait_for_pid_file(&self_pid_file)
+        .await
+        .expect("fake-acp PID was never written");
+
+    let mut fake_acp_died_at: Option<u32> = None;
+    let mut grandchild_died_at: Option<u32> = None;
+    for tick in 0..60 {
+        if fake_acp_died_at.is_none() && !is_process_alive(fake_acp_pid) {
+            fake_acp_died_at = Some(tick);
+        }
+        if grandchild_died_at.is_none() && !is_process_alive(grandchild_pid) {
+            grandchild_died_at = Some(tick);
+        }
+        if fake_acp_died_at.is_some() && grandchild_died_at.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if fake_acp_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &fake_acp_pid.to_string()])
+            .output();
+    }
+    if grandchild_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &grandchild_pid.to_string()])
+            .output();
+    }
+
+    assert!(
+        fake_acp_died_at.is_some(),
+        "fake-acp PID {} survived after request timeout",
+        fake_acp_pid
+    );
+    assert!(
+        grandchild_died_at.is_some(),
+        "grandchild PID {} survived after request timeout (fake-acp PID {} died at tick {:?})",
+        grandchild_pid,
+        fake_acp_pid,
+        fake_acp_died_at
+    );
 }
 
 #[cfg(windows)]
@@ -282,6 +371,7 @@ async fn test_ask_agents_reports_timeout_in_result() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake-acp-timeout-mcp.ps1");
     std::fs::write(&script_path, fake_acp_timeout_script()).unwrap();
+    let prompt_file = temp.path().join("prompt-started.txt");
 
     let mut configs = HashMap::new();
     configs.insert(
@@ -300,18 +390,26 @@ async fn test_ask_agents_reports_timeout_in_result() {
     let event_log = Arc::new(EventLog::new(100));
     let mgr = SessionManager::new(configs, event_log);
 
+    let mgr_for_task = mgr.clone();
+    let project_root_path = temp.path().to_string_lossy().to_string();
+    let tool_handle = tokio::spawn(async move {
+        execute_tool(
+            "ask_agents",
+            json!({
+                "requests": [{"agent": "codex", "message": "slow"}],
+                "timeout": 1,
+                "project_root_path": project_root_path,
+            }),
+            &mgr_for_task,
+        )
+        .await
+    });
+    assert!(
+        wait_for_file(&prompt_file).await,
+        "fake ACP never received session/prompt"
+    );
     let started = Instant::now();
-    let response_json = execute_tool(
-        "ask_agents",
-        json!({
-            "requests": [{"agent": "codex", "message": "slow"}],
-            "timeout": 1,
-            "project_root_path": temp.path().to_string_lossy().to_string(),
-        }),
-        &mgr,
-    )
-    .await
-    .unwrap();
+    let response_json = tool_handle.await.unwrap().unwrap();
     let elapsed = started.elapsed();
 
     let response: AskAgentsResponse = serde_json::from_str(&response_json).unwrap();
@@ -360,7 +458,66 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         continue
     }
     if ($msg.method -eq 'session/prompt') {
+        Set-Content -Path (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'prompt-started.txt') -Value $PID
         Start-Sleep -Seconds 10
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                stopReason = 'end_turn'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+}
+"#
+}
+
+#[cfg(windows)]
+fn fake_acp_timeout_grandchild_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'powershell'
+$psi.Arguments = '-NoProfile -Command "Start-Sleep -Seconds 120"'
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$grandchild = [System.Diagnostics.Process]::Start($psi)
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Content -Path (Join-Path $dir 'grandchild-pid.txt') -Value $grandchild.Id
+Set-Content -Path (Join-Path $dir 'self-pid.txt') -Value $PID
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.method -eq 'initialize') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/new') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                sessionId = 'fake-session'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/prompt') {
+        Start-Sleep -Seconds 120
         $resp = @{
             jsonrpc = '2.0'
             id = $msg.id
@@ -723,6 +880,30 @@ fn is_process_alive(pid: u32) -> bool {
 
         ok != 0 && exit_code == STILL_ACTIVE as u32
     }
+}
+
+#[cfg(windows)]
+async fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {
+    for _ in 0..100 {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+#[cfg(windows)]
+async fn wait_for_file(path: &std::path::Path) -> bool {
+    for _ in 0..100 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
 
 #[cfg(windows)]

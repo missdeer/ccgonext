@@ -82,6 +82,7 @@ impl AcpSession {
         *self.acp_session_id.write().await = None;
         self.set_states(ProcessState::Dead, TurnState::Idle).await;
         if let Some(client) = client {
+            client.terminate().await;
             tokio::spawn(async move {
                 client.shutdown().await;
             });
@@ -188,7 +189,7 @@ impl AcpSession {
         tokio::pin!(prompt_future);
         let attempt = tokio::select! {
             result = &mut prompt_future => PromptAttempt::Completed(result),
-            _ = tokio::time::sleep(timeout) => PromptAttempt::TimedOut { sid: sid.clone() }
+            _ = tokio::time::sleep(timeout) => PromptAttempt::TimedOut
         };
 
         match attempt {
@@ -209,13 +210,13 @@ impl AcpSession {
                 }
                 Err(err)
             }
-            PromptAttempt::TimedOut { sid } => {
+            PromptAttempt::TimedOut => {
                 let client = self.client.write().await.take();
                 *self.acp_session_id.write().await = None;
                 self.set_states(ProcessState::Dead, TurnState::Idle).await;
                 if let Some(client) = client {
+                    client.terminate().await;
                     tokio::spawn(async move {
-                        let _ = client.cancel(&sid).await;
                         client.shutdown().await;
                     });
                 }
@@ -266,9 +267,7 @@ impl AcpSession {
 
 enum PromptAttempt {
     Completed(anyhow::Result<PromptResponse>),
-    TimedOut {
-        sid: agent_client_protocol_schema::SessionId,
-    },
+    TimedOut,
 }
 
 fn stop_reason_to_string(stop_reason: StopReason) -> String {
