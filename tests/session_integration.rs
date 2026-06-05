@@ -433,7 +433,16 @@ async fn test_ask_agents_reports_timeout_in_result() {
 async fn test_mcp_stdio_exit_kills_acp_process_tree() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake-acp-grandchild-server-exit.ps1");
-    std::fs::write(&script_path, fake_acp_grandchild_script()).unwrap();
+    std::fs::write(&script_path, fake_acp_grandchild_with_wrapper_script()).unwrap();
+    let powershell = powershell_exe();
+    std::fs::copy(powershell, temp.path().join("node.exe")).unwrap();
+    std::fs::copy(powershell, temp.path().join("codex-acp.exe")).unwrap();
+    std::fs::write(
+        temp.path().join("fake-node.ps1"),
+        fake_node_wrapper_script(),
+    )
+    .unwrap();
+
     let shim_path = temp.path().join("fake-acp.cmd");
     std::fs::write(
         &shim_path,
@@ -442,6 +451,8 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
     .unwrap();
     let pid_file = temp.path().join("grandchild-pid.txt");
     let self_pid_file = temp.path().join("self-pid.txt");
+    let escaped_node_pid_file = temp.path().join("escaped-node-pid.txt");
+    let escaped_codex_pid_file = temp.path().join("escaped-codex-pid.txt");
 
     let acp_command = shim_path.to_string_lossy().to_string();
 
@@ -543,10 +554,40 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
             );
         }
     };
+    let escaped_node_pid = match wait_for_pid_file(&escaped_node_pid_file).await {
+        Some(pid) => pid,
+        None => {
+            let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+            panic!(
+                "escaped node PID was never written; response={}, stderr={}",
+                tool_text, stderr
+            );
+        }
+    };
+    let escaped_codex_pid = match wait_for_pid_file(&escaped_codex_pid_file).await {
+        Some(pid) => pid,
+        None => {
+            let (_, stderr) = stop_test_server(server, stdin, stderr_task).await;
+            panic!(
+                "escaped codex-acp PID was never written; response={}, stderr={}",
+                tool_text, stderr
+            );
+        }
+    };
     assert!(
         is_process_alive(grandchild_pid),
         "grandchild PID {} should be alive before server exit",
         grandchild_pid
+    );
+    assert!(
+        is_process_alive(escaped_node_pid),
+        "escaped node PID {} should be alive before server exit",
+        escaped_node_pid
+    );
+    assert!(
+        is_process_alive(escaped_codex_pid),
+        "escaped codex-acp PID {} should be alive before server exit",
+        escaped_codex_pid
     );
 
     let (status, _stderr) = stop_test_server(server, stdin, stderr_task).await;
@@ -555,6 +596,8 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
 
     let mut fake_acp_died_at: Option<u32> = None;
     let mut grandchild_died_at: Option<u32> = None;
+    let mut escaped_node_died_at: Option<u32> = None;
+    let mut escaped_codex_died_at: Option<u32> = None;
     for tick in 0..60 {
         if fake_acp_died_at.is_none() && !is_process_alive(fake_acp_pid) {
             fake_acp_died_at = Some(tick);
@@ -562,7 +605,17 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
         if grandchild_died_at.is_none() && !is_process_alive(grandchild_pid) {
             grandchild_died_at = Some(tick);
         }
-        if fake_acp_died_at.is_some() && grandchild_died_at.is_some() {
+        if escaped_node_died_at.is_none() && !is_process_alive(escaped_node_pid) {
+            escaped_node_died_at = Some(tick);
+        }
+        if escaped_codex_died_at.is_none() && !is_process_alive(escaped_codex_pid) {
+            escaped_codex_died_at = Some(tick);
+        }
+        if fake_acp_died_at.is_some()
+            && grandchild_died_at.is_some()
+            && escaped_node_died_at.is_some()
+            && escaped_codex_died_at.is_some()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -578,6 +631,16 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
             .args(["/F", "/T", "/PID", &grandchild_pid.to_string()])
             .output();
     }
+    if escaped_node_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &escaped_node_pid.to_string()])
+            .output();
+    }
+    if escaped_codex_died_at.is_none() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &escaped_codex_pid.to_string()])
+            .output();
+    }
 
     assert!(
         fake_acp_died_at.is_some(),
@@ -590,6 +653,18 @@ async fn test_mcp_stdio_exit_kills_acp_process_tree() {
         grandchild_pid,
         fake_acp_pid,
         fake_acp_died_at
+    );
+    assert!(
+        escaped_node_died_at.is_some(),
+        "escaped node PID {} survived after ccgonext stdio exit",
+        escaped_node_pid
+    );
+    assert!(
+        escaped_codex_died_at.is_some(),
+        "escaped codex-acp PID {} survived after ccgonext stdio exit (escaped node PID {} died at tick {:?})",
+        escaped_codex_pid,
+        escaped_node_pid,
+        escaped_node_died_at
     );
 }
 
@@ -617,6 +692,105 @@ async fn stop_test_server(
     };
 
     (status, stderr)
+}
+
+#[cfg(windows)]
+fn powershell_exe() -> &'static str {
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+}
+
+#[cfg(windows)]
+fn fake_node_wrapper_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Content -Path (Join-Path $dir 'escaped-node-pid.txt') -Value $PID
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = (Join-Path $dir 'codex-acp.exe')
+$codexPidPath = Join-Path $dir 'escaped-codex-pid.txt'
+$psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"Set-Content -Path '$codexPidPath' -Value `$PID; Start-Sleep -Seconds 120`""
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$codex = [System.Diagnostics.Process]::Start($psi)
+$codex.WaitForExit()
+"#
+}
+
+#[cfg(windows)]
+fn fake_acp_grandchild_with_wrapper_script() -> &'static str {
+    r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -Namespace JC -Name P -MemberDefinition @"
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool IsProcessInJob(IntPtr h, IntPtr j, out bool r);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint a, bool i, uint id);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+"@
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$nodePsi = New-Object System.Diagnostics.ProcessStartInfo
+$nodePsi.FileName = (Join-Path $dir 'node.exe')
+$nodePsi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $dir 'fake-node.ps1') + '"'
+$nodePsi.UseShellExecute = $false
+$nodePsi.CreateNoWindow = $true
+$node = [System.Diagnostics.Process]::Start($nodePsi)
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'powershell'
+$psi.Arguments = '-NoProfile -Command "Start-Sleep -Seconds 120"'
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$grandchild = [System.Diagnostics.Process]::Start($psi)
+Set-Content -Path (Join-Path $dir 'grandchild-pid.txt') -Value $grandchild.Id
+Set-Content -Path (Join-Path $dir 'self-pid.txt') -Value $PID
+$selfInJob = $false
+$gcInJob = $false
+$selfH = [JC.P]::OpenProcess(0x400, $false, [uint32]$PID)
+[JC.P]::IsProcessInJob($selfH, [IntPtr]::Zero, [ref]$selfInJob) | Out-Null
+[JC.P]::CloseHandle($selfH) | Out-Null
+$gcH = [JC.P]::OpenProcess(0x400, $false, [uint32]$grandchild.Id)
+[JC.P]::IsProcessInJob($gcH, [IntPtr]::Zero, [ref]$gcInJob) | Out-Null
+[JC.P]::CloseHandle($gcH) | Out-Null
+Set-Content -Path (Join-Path $dir 'job-status.txt') -Value "self=$selfInJob;grandchild=$gcInJob"
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $msg = $line | ConvertFrom-Json
+    if ($msg.method -eq 'initialize') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/new') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                sessionId = 'fake-session'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+    if ($msg.method -eq 'session/prompt') {
+        $resp = @{
+            jsonrpc = '2.0'
+            id = $msg.id
+            result = @{
+                stopReason = 'end_turn'
+            }
+        }
+        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 10))
+        continue
+    }
+}
+"#
 }
 
 #[cfg(windows)]

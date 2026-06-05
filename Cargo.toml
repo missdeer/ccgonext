@@ -49,10 +49,12 @@ agent-client-protocol-schema = { version = "0.11", features = ["unstable_cancel_
 # Process group / Job Object wrapper for cross-platform child process cleanup
 process-wrap = { version = "6", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.14"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [[bin]]
 name = "ccgonext"

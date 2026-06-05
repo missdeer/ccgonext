@@ -10,6 +10,7 @@ use process_wrap::tokio::JobObject;
 
 pub struct AcpProcess {
     pub child: Box<dyn TokioChildWrapper>,
+    pub root_pid: Option<u32>,
     pub stdin: ChildStdin,
     pub stdout: BufReader<ChildStdout>,
     pub stderr: ChildStderr,
@@ -49,6 +50,7 @@ impl AcpProcess {
         let mut child = wrap
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn ACP agent '{}': {}", command, e))?;
+        let root_pid = child.id();
 
         let stdin = child
             .stdin()
@@ -65,6 +67,7 @@ impl AcpProcess {
 
         Ok(Self {
             child,
+            root_pid,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,

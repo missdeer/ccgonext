@@ -1,5 +1,6 @@
 pub mod callbacks;
 pub mod process;
+mod process_tree;
 pub mod protocol;
 
 use agent_client_protocol_schema::{
@@ -42,6 +43,7 @@ pub struct AcpClient {
     wait_handle: Mutex<Option<JoinHandle<()>>>,
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
     child: SharedChild,
+    child_root_pid: Option<u32>,
     callback_handler: Arc<CallbackHandler>,
     connected: Arc<AtomicBool>,
 }
@@ -73,6 +75,7 @@ impl AcpClient {
             cwd.to_path_buf(),
         ));
 
+        let child_root_pid = proc.root_pid;
         let child = Arc::new(Mutex::new(Some(proc.child)));
 
         let writer_handle = tokio::spawn(writer_task(
@@ -80,6 +83,7 @@ impl AcpClient {
             writer_rx,
             connected.clone(),
             child.clone(),
+            child_root_pid,
         ));
 
         let stderr_handle = tokio::spawn(drain_stderr(proc.stderr, agent_name.clone()));
@@ -91,12 +95,13 @@ impl AcpClient {
             callback_handler.clone(),
             writer_tx.clone(),
             child.clone(),
+            child_root_pid,
             event_log.clone(),
             session_id,
             agent_name,
         ));
 
-        let wait_handle = tokio::spawn(wait_task(child.clone(), connected.clone()));
+        let wait_handle = tokio::spawn(wait_task(child.clone(), child_root_pid, connected.clone()));
 
         Ok(Self {
             writer_tx,
@@ -107,6 +112,7 @@ impl AcpClient {
             wait_handle: Mutex::new(Some(wait_handle)),
             stderr_handle: Mutex::new(Some(stderr_handle)),
             child,
+            child_root_pid,
             callback_handler,
             connected,
         })
@@ -205,14 +211,14 @@ impl AcpClient {
 
     pub async fn terminate(&self) {
         self.connected.store(false, Ordering::SeqCst);
-        start_kill_child(&self.child).await;
+        start_kill_child(&self.child, self.child_root_pid).await;
     }
 
     pub async fn shutdown(&self) {
         self.callback_handler.shutdown().await;
         self.connected.store(false, Ordering::SeqCst);
         let _ = self.writer_tx.try_send(WriterMsg::Shutdown);
-        kill_child(&self.child).await;
+        kill_child(&self.child, self.child_root_pid).await;
 
         let writer = self.writer_handle.lock().await.take();
         let reader = self.reader_handle.lock().await.take();
@@ -233,7 +239,7 @@ impl AcpClient {
         if let Some(h) = wait {
             let _ = h.await;
         }
-        kill_child(&self.child).await;
+        kill_child(&self.child, self.child_root_pid).await;
         if let Some(h) = writer {
             let _ = h.await;
         }
@@ -271,6 +277,7 @@ impl Drop for AcpClient {
             }
         }
         if let Ok(mut child) = self.child.try_lock() {
+            process_tree::kill_acp_descendants(self.child_root_pid);
             if let Some(mut c) = child.take() {
                 let _ = c.start_kill();
             }
@@ -278,7 +285,8 @@ impl Drop for AcpClient {
     }
 }
 
-async fn start_kill_child(child: &SharedChild) {
+async fn start_kill_child(child: &SharedChild, root_pid: Option<u32>) {
+    process_tree::kill_acp_descendants(root_pid);
     let mut guard = child.lock().await;
     if let Some(c) = guard.as_mut() {
         let _ = c.start_kill();
@@ -300,6 +308,7 @@ async fn writer_task(
     mut rx: mpsc::Receiver<WriterMsg>,
     connected: Arc<AtomicBool>,
     child: SharedChild,
+    child_root_pid: Option<u32>,
 ) {
     let mut needs_child_cleanup = false;
     while let Some(msg) = rx.recv().await {
@@ -324,7 +333,7 @@ async fn writer_task(
 
     connected.store(false, Ordering::SeqCst);
     if needs_child_cleanup {
-        kill_child(&child).await;
+        kill_child(&child, child_root_pid).await;
     }
 }
 
@@ -336,6 +345,7 @@ async fn reader_task(
     callback_handler: Arc<CallbackHandler>,
     writer_tx: mpsc::Sender<WriterMsg>,
     child: SharedChild,
+    child_root_pid: Option<u32>,
     event_log: Arc<EventLog>,
     session_id: String,
     agent_name: String,
@@ -431,7 +441,7 @@ async fn reader_task(
     }
 
     connected.store(false, Ordering::SeqCst);
-    kill_child(&child).await;
+    kill_child(&child, child_root_pid).await;
     fail_pending_requests(
         &pending,
         format!("ACP agent connection closed for {}", agent_name),
@@ -609,7 +619,7 @@ fn format_tool_call_output(
     })
 }
 
-async fn wait_task(child: SharedChild, connected: Arc<AtomicBool>) {
+async fn wait_task(child: SharedChild, child_root_pid: Option<u32>, connected: Arc<AtomicBool>) {
     loop {
         {
             let mut guard = child.lock().await;
@@ -622,10 +632,11 @@ async fn wait_task(child: SharedChild, connected: Arc<AtomicBool>) {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     connected.store(false, Ordering::SeqCst);
-    kill_child(&child).await;
+    kill_child(&child, child_root_pid).await;
 }
 
-async fn kill_child(child: &SharedChild) {
+async fn kill_child(child: &SharedChild, root_pid: Option<u32>) {
+    process_tree::kill_acp_descendants(root_pid);
     let taken_child = child.lock().await.take();
     if let Some(mut c) = taken_child {
         let _ = c.start_kill();
