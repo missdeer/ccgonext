@@ -6,8 +6,21 @@ struct ProcessInfo {
 }
 
 pub fn kill_acp_descendants(root_pid: Option<u32>) {
-    let Some(root_pid) = root_pid else { return };
+    let Some(root_pid) = root_pid else {
+        tracing::debug!("kill_acp_descendants: no root pid, skipping");
+        return;
+    };
+    tracing::debug!(root_pid, "kill_acp_descendants: walking process tree");
     platform::kill_acp_descendants(root_pid);
+}
+
+/// Best-effort TerminateProcess on a single PID. Used as a safety net for the
+/// wrapper (root) process itself when the JobObject path can't be relied on
+/// (e.g. AcpClient::Drop racing with task abortion). No-op when pid is None.
+pub fn kill_process(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    tracing::debug!(pid, "kill_process: terminating");
+    platform::kill_process(pid);
 }
 
 fn collect_descendants(processes: &[ProcessInfo], root_pid: u32) -> Vec<ProcessInfo> {
@@ -24,17 +37,9 @@ fn collect_descendants(processes: &[ProcessInfo], root_pid: u32) -> Vec<ProcessI
     descendants
 }
 
-fn is_acp_wrapper_process(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "cmd.exe" | "node.exe" | "codex-acp.exe" | "node" | "codex-acp"
-    )
-}
-
 #[cfg(windows)]
 mod platform {
-    use super::{collect_descendants, is_acp_wrapper_process, ProcessInfo};
+    use super::{collect_descendants, ProcessInfo};
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -43,17 +48,24 @@ mod platform {
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     pub fn kill_acp_descendants(root_pid: u32) {
-        let Ok(processes) = snapshot_processes() else {
-            return;
+        let processes = match snapshot_processes() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(root_pid, error = %e, "snapshot_processes failed");
+                return;
+            }
         };
 
-        let mut targets = collect_descendants(&processes, root_pid)
-            .into_iter()
-            .filter(|process| is_acp_wrapper_process(&process.name))
-            .collect::<Vec<_>>();
+        let mut targets = collect_descendants(&processes, root_pid);
         targets.sort_by_key(|process| std::cmp::Reverse(process.pid));
 
+        if targets.is_empty() {
+            tracing::debug!(root_pid, "no descendants found");
+            return;
+        }
+
         for process in targets {
+            tracing::debug!(root_pid, pid = process.pid, name = %process.name, "terminating descendant");
             kill_process(process.pid);
         }
     }
@@ -92,13 +104,25 @@ mod platform {
         String::from_utf16_lossy(&name[..len])
     }
 
-    fn kill_process(pid: u32) {
+    pub(super) fn kill_process(pid: u32) {
         let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
         if handle.is_null() {
+            tracing::debug!(
+                pid,
+                error = %std::io::Error::last_os_error(),
+                "OpenProcess failed (likely already exited)"
+            );
             return;
         }
+        let terminated = unsafe { TerminateProcess(handle, 1) };
+        if terminated == 0 {
+            tracing::debug!(
+                pid,
+                error = %std::io::Error::last_os_error(),
+                "TerminateProcess failed"
+            );
+        }
         unsafe {
-            let _ = TerminateProcess(handle, 1);
             CloseHandle(handle);
         }
     }
@@ -106,20 +130,27 @@ mod platform {
 
 #[cfg(all(unix, target_os = "linux"))]
 mod platform {
-    use super::{collect_descendants, is_acp_wrapper_process, ProcessInfo};
+    use super::{collect_descendants, ProcessInfo};
 
     pub fn kill_acp_descendants(root_pid: u32) {
-        let Ok(processes) = snapshot_processes() else {
-            return;
+        let processes = match snapshot_processes() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(root_pid, error = %e, "snapshot_processes failed");
+                return;
+            }
         };
 
-        let mut targets = collect_descendants(&processes, root_pid)
-            .into_iter()
-            .filter(|process| is_acp_wrapper_process(&process.name))
-            .collect::<Vec<_>>();
+        let mut targets = collect_descendants(&processes, root_pid);
         targets.sort_by_key(|process| std::cmp::Reverse(process.pid));
 
+        if targets.is_empty() {
+            tracing::debug!(root_pid, "no descendants found");
+            return;
+        }
+
         for process in targets {
+            tracing::debug!(root_pid, pid = process.pid, name = %process.name, "terminating descendant");
             kill_process(process.pid);
         }
     }
@@ -155,40 +186,53 @@ mod platform {
         parts.next()?.parse().ok()
     }
 
-    fn kill_process(pid: u32) {
-        let _ = std::process::Command::new("kill")
+    pub(super) fn kill_process(pid: u32) {
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
-            .status();
+            .status()
+        {
+            tracing::debug!(pid, error = %e, "kill -TERM failed");
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = std::process::Command::new("kill")
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
-            .status();
+            .status()
+        {
+            tracing::debug!(pid, error = %e, "kill -KILL failed");
+        }
     }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 mod platform {
-    use super::{collect_descendants, is_acp_wrapper_process, ProcessInfo};
+    use super::{collect_descendants, ProcessInfo};
 
     pub fn kill_acp_descendants(root_pid: u32) {
-        let Ok(output) = std::process::Command::new("ps")
+        let output = match std::process::Command::new("ps")
             .args(["-axo", "pid=,ppid=,comm="])
             .output()
-        else {
-            return;
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(root_pid, error = %e, "ps snapshot failed");
+                return;
+            }
         };
         let processes = String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(parse_ps_line)
             .collect::<Vec<_>>();
 
-        let mut targets = collect_descendants(&processes, root_pid)
-            .into_iter()
-            .filter(|process| is_acp_wrapper_process(&process.name))
-            .collect::<Vec<_>>();
+        let mut targets = collect_descendants(&processes, root_pid);
         targets.sort_by_key(|process| std::cmp::Reverse(process.pid));
 
+        if targets.is_empty() {
+            tracing::debug!(root_pid, "no descendants found");
+            return;
+        }
+
         for process in targets {
+            tracing::debug!(root_pid, pid = process.pid, name = %process.name, "terminating descendant");
             kill_process(process.pid);
         }
     }
@@ -204,18 +248,25 @@ mod platform {
         Some(ProcessInfo { pid, ppid, name })
     }
 
-    fn kill_process(pid: u32) {
-        let _ = std::process::Command::new("kill")
+    pub(super) fn kill_process(pid: u32) {
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
-            .status();
+            .status()
+        {
+            tracing::debug!(pid, error = %e, "kill -TERM failed");
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = std::process::Command::new("kill")
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
-            .status();
+            .status()
+        {
+            tracing::debug!(pid, error = %e, "kill -KILL failed");
+        }
     }
 }
 
 #[cfg(not(any(windows, unix)))]
 mod platform {
     pub fn kill_acp_descendants(_root_pid: u32) {}
+    pub(super) fn kill_process(_pid: u32) {}
 }

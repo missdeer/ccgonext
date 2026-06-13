@@ -3,6 +3,8 @@ pub mod process;
 mod process_tree;
 pub mod protocol;
 
+pub use process_tree::{kill_acp_descendants, kill_process};
+
 use agent_client_protocol_schema::{
     CancelNotification, ContentBlock, CreateTerminalRequest, InitializeRequest, InitializeResponse,
     KillTerminalRequest, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
@@ -209,6 +211,10 @@ impl AcpClient {
         self.connected.load(Ordering::SeqCst)
     }
 
+    pub fn root_pid(&self) -> Option<u32> {
+        self.child_root_pid
+    }
+
     pub async fn terminate(&self) {
         self.connected.store(false, Ordering::SeqCst);
         start_kill_child(&self.child, self.child_root_pid).await;
@@ -276,21 +282,66 @@ impl Drop for AcpClient {
                 h.abort();
             }
         }
+        // Walk descendant tree unconditionally — we cannot count on JobObject
+        // KILL_ON_JOB_CLOSE because some agents (codex-acp) appear to be running
+        // outside our job by the time we get here.
+        process_tree::kill_acp_descendants(self.child_root_pid);
+        let mut wrapper_killed = false;
         if let Ok(mut child) = self.child.try_lock() {
-            process_tree::kill_acp_descendants(self.child_root_pid);
             if let Some(mut c) = child.take() {
-                let _ = c.start_kill();
+                match c.start_kill() {
+                    Ok(()) => {
+                        wrapper_killed = true;
+                        tracing::info!(
+                            root_pid = ?self.child_root_pid,
+                            "AcpClient::drop: start_kill ok"
+                        );
+                    }
+                    Err(e) => tracing::warn!(
+                        root_pid = ?self.child_root_pid,
+                        error = %e,
+                        "AcpClient::drop: start_kill failed"
+                    ),
+                }
             }
+        } else {
+            tracing::debug!(
+                root_pid = ?self.child_root_pid,
+                "AcpClient::drop: child lock contended, falling back to root kill"
+            );
         }
+        // Safety net: if start_kill didn't succeed (or we couldn't reach the
+        // wrapper at all), TerminateProcess the root pid directly so cmd.exe
+        // itself doesn't outlive ccgo.
+        if !wrapper_killed {
+            process_tree::kill_process(self.child_root_pid);
+        }
+        process_tree::kill_acp_descendants(self.child_root_pid);
     }
 }
 
 async fn start_kill_child(child: &SharedChild, root_pid: Option<u32>) {
     process_tree::kill_acp_descendants(root_pid);
     let mut guard = child.lock().await;
+    let mut wrapper_killed = false;
     if let Some(c) = guard.as_mut() {
-        let _ = c.start_kill();
+        match c.start_kill() {
+            Ok(()) => {
+                wrapper_killed = true;
+                tracing::info!(root_pid = ?root_pid, "start_kill_child: TerminateJobObject ok")
+            }
+            Err(e) => {
+                tracing::warn!(root_pid = ?root_pid, error = %e, "start_kill_child: TerminateJobObject failed")
+            }
+        }
+    } else {
+        tracing::debug!(root_pid = ?root_pid, "start_kill_child: wrapped child already taken");
     }
+    drop(guard);
+    if !wrapper_killed {
+        process_tree::kill_process(root_pid);
+    }
+    process_tree::kill_acp_descendants(root_pid);
 }
 
 async fn fail_pending_requests(
@@ -638,23 +689,48 @@ async fn wait_task(child: SharedChild, child_root_pid: Option<u32>, connected: A
 async fn kill_child(child: &SharedChild, root_pid: Option<u32>) {
     process_tree::kill_acp_descendants(root_pid);
     let taken_child = child.lock().await.take();
+    let mut wrapper_killed = false;
     if let Some(mut c) = taken_child {
-        let _ = c.start_kill();
-        let _ = tokio::task::spawn_blocking(move || {
+        match c.start_kill() {
+            Ok(()) => {
+                tracing::info!(root_pid = ?root_pid, "start_kill (TerminateJobObject) ok");
+            }
+            Err(e) => tracing::warn!(root_pid = ?root_pid, error = %e, "start_kill failed"),
+        }
+        // start_kill returning Ok only means the syscall was issued; only consider
+        // the wrapper actually dead once try_wait observes its exit. If we hit the
+        // 5s deadline, treat it as not killed so the kill_process(root_pid)
+        // safety net below still runs.
+        let exited = tokio::task::spawn_blocking(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match c.try_wait() {
-                    Ok(Some(_)) | Err(_) => return,
+                    Ok(Some(_)) => return true,
+                    // try_wait Err is ambiguous (could mean reaped elsewhere,
+                    // could mean a real OS error). Don't assume the process is
+                    // dead — let the kill_process(root_pid) safety net fire.
+                    Err(e) => {
+                        tracing::debug!(error = %e, "try_wait error, falling back to root kill");
+                        return false;
+                    }
                     Ok(None) if std::time::Instant::now() >= deadline => {
                         tracing::warn!("Timed out waiting for ACP process tree to exit after kill");
-                        return;
+                        return false;
                     }
                     Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
                 }
             }
         })
-        .await;
+        .await
+        .unwrap_or(false);
+        wrapper_killed = exited;
+    } else {
+        tracing::debug!(root_pid = ?root_pid, "kill_child: wrapped child already taken");
     }
+    if !wrapper_killed {
+        process_tree::kill_process(root_pid);
+    }
+    process_tree::kill_acp_descendants(root_pid);
 }
 
 #[cfg(test)]

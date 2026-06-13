@@ -1,4 +1,4 @@
-use crate::acp::AcpClient;
+use crate::acp::{kill_acp_descendants, kill_process, AcpClient};
 use crate::config::AgentConfig;
 use crate::events::{EventLog, EventPayload};
 use crate::state::{ProcessState, TurnState};
@@ -22,6 +22,10 @@ pub struct AcpSession {
     turn_state: RwLock<TurnState>,
     client: RwLock<Option<Arc<AcpClient>>>,
     acp_session_id: RwLock<Option<agent_client_protocol_schema::SessionId>>,
+    // Last spawned wrapper PID. Kept independently of `client` so that even if
+    // `mark_dead` takes the client (and the spawned shutdown task races with
+    // ccgo's own exit), `shutdown` still has a root pid to sweep descendants.
+    child_root_pid: RwLock<Option<u32>>,
     config: AgentConfig,
     event_log: Arc<EventLog>,
     last_activity: RwLock<Instant>,
@@ -37,6 +41,7 @@ impl AcpSession {
             turn_state: RwLock::new(TurnState::Idle),
             client: RwLock::new(None),
             acp_session_id: RwLock::new(None),
+            child_root_pid: RwLock::new(None),
             config,
             event_log,
             last_activity: RwLock::new(Instant::now()),
@@ -82,7 +87,19 @@ impl AcpSession {
         *self.acp_session_id.write().await = None;
         self.set_states(ProcessState::Dead, TurnState::Idle).await;
         if let Some(client) = client {
+            // terminate() sends TerminateJobObject + a descendant sweep, but its
+            // `wrapper_killed` check is based on the syscall return rather than
+            // observed exit. Add an explicit kill_process(root_pid) as a non-
+            // blocking safety net before we forget the PID, so even a silently-
+            // failed start_kill doesn't strand cmd.exe.
             client.terminate().await;
+            let root_pid = *self.child_root_pid.read().await;
+            kill_acp_descendants(root_pid);
+            kill_process(root_pid);
+            // Clear the stored PID right now: the process is dead, and keeping
+            // the PID around risks a later session.shutdown sweep hitting a
+            // recycled PID belonging to an unrelated process.
+            *self.child_root_pid.write().await = None;
             tokio::spawn(async move {
                 client.shutdown().await;
             });
@@ -129,8 +146,14 @@ impl AcpSession {
             }
         };
 
+        // Track the wrapper PID immediately so initialize/new_session failures
+        // (which run client.shutdown()) still have a root pid available for the
+        // tree sweep. Cleared on every failure path below.
+        *self.child_root_pid.write().await = client.root_pid();
+
         if let Err(e) = client.initialize(&self.key.cwd).await {
             client.shutdown().await;
+            *self.child_root_pid.write().await = None;
             self.set_states(ProcessState::Dead, TurnState::Idle).await;
             return Err(e);
         }
@@ -139,6 +162,7 @@ impl AcpSession {
             Ok(s) => s,
             Err(e) => {
                 client.shutdown().await;
+                *self.child_root_pid.write().await = None;
                 self.set_states(ProcessState::Dead, TurnState::Idle).await;
                 return Err(e);
             }
@@ -211,15 +235,7 @@ impl AcpSession {
                 Err(err)
             }
             PromptAttempt::TimedOut => {
-                let client = self.client.write().await.take();
-                *self.acp_session_id.write().await = None;
-                self.set_states(ProcessState::Dead, TurnState::Idle).await;
-                if let Some(client) = client {
-                    client.terminate().await;
-                    tokio::spawn(async move {
-                        client.shutdown().await;
-                    });
-                }
+                self.mark_dead().await;
                 Err(anyhow::anyhow!("Request timed out"))
             }
         }
@@ -247,12 +263,37 @@ impl AcpSession {
     }
 
     pub async fn shutdown(&self) {
+        let root_pid = *self.child_root_pid.read().await;
+        tracing::info!(
+            agent = %self.key.agent,
+            session = %self.id,
+            ?root_pid,
+            "session shutdown begin"
+        );
         let client = self.client.write().await.take();
         if let Some(c) = client {
             c.shutdown().await;
+        } else if root_pid.is_some() {
+            // mark_dead already took the client; the spawned shutdown task may
+            // never finish if ccgo exits first. Kill the wrapper pid itself
+            // (cmd.exe) and sweep descendants ourselves.
+            tracing::info!(
+                ?root_pid,
+                "session shutdown: client already taken, killing root + sweeping descendants"
+            );
+            kill_acp_descendants(root_pid);
+            kill_process(root_pid);
         }
+        // Final unconditional sweep to catch anything that escaped.
+        kill_acp_descendants(root_pid);
+        *self.child_root_pid.write().await = None;
         *self.acp_session_id.write().await = None;
         self.set_states(ProcessState::Dead, TurnState::Idle).await;
+        tracing::info!(
+            agent = %self.key.agent,
+            session = %self.id,
+            "session shutdown done"
+        );
     }
 
     pub async fn respond_to_permission(&self, perm_id: &str, granted: bool) {
