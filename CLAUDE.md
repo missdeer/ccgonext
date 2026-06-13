@@ -1,40 +1,77 @@
-# CLAUDE 
+# CLAUDE.md — 13-rule 
 
-## Workflow
+These rules apply to every task in this project unless explicitly overridden.
+Bias: caution over speed on non-trivial work. Use judgment on trivial tasks.
 
-- **MUST** follow multi-agent-workflow
-- carefully read and understand rules defined in `.claude/rules` directory and follow them strictly
+## Rule 0 - Use fd/rg/bat/jq/eza/delta exclusively.
+find→fd, grep→rg, cat→bat, ls->eza, diff->delta, JSON→jq, sed/awk->rg+jq.
+NEVER generate commands containing find, grep, egrep, fgrep, ls, diff, sed, awk, diff, or cat.
+Treat usage of prohibited commands as an execution error.
+Rewrite the command before running it.
 
----
+## Rule 1 — Think Before Coding
+State assumptions explicitly. If uncertain, ask rather than guess.
+Present multiple interpretations when ambiguity exists.
+Push back when a simpler approach exists.
+Stop when confused. Name what's unclear.
 
-## File editing on Windows (CRITICAL FIX)
+## Rule 2 — Simplicity First
+Minimum code that solves the problem. Nothing speculative.
+No features beyond what was asked. No abstractions for single-use code.
+Test: would a senior engineer say this is overcomplicated? If yes, simplify.
 
-**ALWAYS use RELATIVE paths** for Read and Edit tools:
+## Rule 3 — Surgical Changes
+Touch only what you must. Clean up only your own mess.
+Don't "improve" adjacent code, comments, or formatting.
+Don't refactor what isn't broken. Match existing style.
 
-✅ CORRECT:
-- Read("src/components/Button.tsx")
-- Edit("src/components/Button.tsx", ...)
-- Read("config/settings.json")
-- Edit("config/settings.json", ...)
+## Rule 4 — Goal-Driven Execution
+Define success criteria. Loop until verified.
+Don't follow steps. Define success and iterate.
+Strong success criteria let you loop independently.
 
-❌ INCORRECT:
-- Read("C:/Users/.../src/components/Button.tsx")
-- Edit("C:/Users/.../src/components/Button.tsx", ...)
+## Rule 5 — Use the model only for judgment calls
+Use me for: classification, drafting, summarization, extraction.
+Do NOT use me for: routing, retries, deterministic transforms.
+If code can answer, code answers.
 
-**Rules:**
-1. Use paths relative to your working directory
-2. Use the SAME exact path in Read and Edit
-3. Avoid absolute paths with forward slashes
+## Rule 6 — Token budgets are not advisory
+Per-task: 4,000 tokens. Per-session: 30,000 tokens.
+If approaching budget, summarize and start fresh.
+Surface the breach. Do not silently overrun.
 
-**If error persists:** Re-read with the SAME relative path.
+## Rule 7 — Surface conflicts, don't average them
+If two patterns contradict, pick one (more recent / more tested).
+Explain why. Flag the other for cleanup.
+Don't blend conflicting patterns.
 
----
+## Rule 8 — Read before you write
+Before adding code, read exports, immediate callers, shared utilities.
+"Looks orthogonal" is dangerous. If unsure why code is structured a way, ask.
 
-## Project Overview
+## Rule 9 — Tests verify intent, not just behavior
+Tests must encode WHY behavior matters, not just WHAT it does.
+A test that can't fail when business logic changes is wrong.
+
+## Rule 10 — Checkpoint after every significant step
+Summarize what was done, what's verified, what's left.
+Don't continue from a state you can't describe back.
+If you lose track, stop and restate.
+
+## Rule 11 — Match the codebase's conventions, even if you disagree
+Conformance > taste inside the codebase.
+If you genuinely think a convention is harmful, surface it. Don't fork silently.
+
+## Rule 12 — Fail loud
+"Completed" is wrong if anything was skipped silently.
+"Tests pass" is wrong if any were skipped.
+Default to surfacing uncertainty, not hiding it.
+
+# Project Overview
 
 CCGO (ClaudeCode-Codex-Gemini-OpenCode) is an MCP (Model Context Protocol) server that enables Claude Code to orchestrate multiple AI coding assistants (Codex, Gemini, OpenCode) through a unified interface. It runs as an MCP server over stdio while providing a web UI for real-time activity monitoring.
 
-## Build and Development Commands
+# Build and Development Commands
 
 ```bash
 # Build
@@ -63,7 +100,7 @@ cargo check --all-targets --all-features
 
 Minimum supported Rust version: 1.90
 
-## Architecture
+# Architecture
 
 ```
 src/
@@ -90,18 +127,18 @@ src/
     └── static_files.rs  # Embedded static files (rust-embed)
 ```
 
-### Key Data Flow
+## Key Data Flow
 
 1. **MCP Request** → `McpServer::handle_tools_call` → `execute_tool("ask_agents", ...)` → `SessionManager::get_or_create(agent, cwd)` → `AcpSession::ask()`
 2. **AcpSession::ask** → auto-starts ACP subprocess if stopped → sends prompt via JSON-RPC → waits for response with timeout
 3. **Structured Events** → ACP session/update notifications → EventLog → broadcast to WebSocket subscribers
 
-### Agent State Machine
+## Agent State Machine
 
 `Stopped` → (ensure_running) → `Starting` → `Running` + `Idle` ⇄ (ask/response) → `Prompting`
 Any running state → (shutdown/process died/timeout) → `Dead`
 
-### ACP Layer
+## ACP Layer
 
 Uses ACP (Agent Client Protocol) over stdio for structured agent communication. Each agent gets its own subprocess with:
 - JSON-RPC request/response dispatch with pending map
@@ -109,7 +146,7 @@ Uses ACP (Agent Client Protocol) over stdio for structured agent communication. 
 - Configurable callback policy (deny-all, read-only, ask, auto-approve)
 - Idle timeout with automatic reaping (default 900s, configurable via --idle-timeout)
 
-## MCP Tool
+# MCP Tool
 
 Single tool exposed: `ask_agents`
 - `requests`: Array of 1-4 agent requests, each containing:
