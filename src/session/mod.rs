@@ -1,4 +1,4 @@
-use crate::acp::{kill_acp_descendants, kill_process, AcpClient};
+use crate::acp::AcpClient;
 use crate::config::AgentConfig;
 use crate::events::{EventLog, EventPayload};
 use crate::state::{ProcessState, TurnState};
@@ -85,21 +85,10 @@ impl AcpSession {
     async fn mark_dead(&self) {
         let client = self.client.write().await.take();
         *self.acp_session_id.write().await = None;
+        *self.child_root_pid.write().await = None;
         self.set_states(ProcessState::Dead, TurnState::Idle).await;
         if let Some(client) = client {
-            // terminate() sends TerminateJobObject + a descendant sweep, but its
-            // `wrapper_killed` check is based on the syscall return rather than
-            // observed exit. Add an explicit kill_process(root_pid) as a non-
-            // blocking safety net before we forget the PID, so even a silently-
-            // failed start_kill doesn't strand cmd.exe.
             client.terminate().await;
-            let root_pid = *self.child_root_pid.read().await;
-            kill_acp_descendants(root_pid);
-            kill_process(root_pid);
-            // Clear the stored PID right now: the process is dead, and keeping
-            // the PID around risks a later session.shutdown sweep hitting a
-            // recycled PID belonging to an unrelated process.
-            *self.child_root_pid.write().await = None;
             tokio::spawn(async move {
                 client.shutdown().await;
             });
@@ -273,19 +262,7 @@ impl AcpSession {
         let client = self.client.write().await.take();
         if let Some(c) = client {
             c.shutdown().await;
-        } else if root_pid.is_some() {
-            // mark_dead already took the client; the spawned shutdown task may
-            // never finish if ccgo exits first. Kill the wrapper pid itself
-            // (cmd.exe) and sweep descendants ourselves.
-            tracing::info!(
-                ?root_pid,
-                "session shutdown: client already taken, killing root + sweeping descendants"
-            );
-            kill_acp_descendants(root_pid);
-            kill_process(root_pid);
         }
-        // Final unconditional sweep to catch anything that escaped.
-        kill_acp_descendants(root_pid);
         *self.child_root_pid.write().await = None;
         *self.acp_session_id.write().await = None;
         self.set_states(ProcessState::Dead, TurnState::Idle).await;

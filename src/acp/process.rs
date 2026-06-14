@@ -1,12 +1,15 @@
-use process_wrap::tokio::{KillOnDrop, TokioChildWrapper, TokioCommandWrap};
+use process_wrap::tokio::TokioChildWrapper;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
-#[cfg(windows)]
-use process_wrap::tokio::JobObject;
+#[cfg(not(windows))]
+use process_wrap::tokio::{KillOnDrop, ProcessGroup, TokioCommandWrap};
+#[cfg(not(windows))]
+use std::process::Stdio;
+#[cfg(not(windows))]
+use tokio::process::Command;
 
 pub struct AcpProcess {
     pub child: Box<dyn TokioChildWrapper>,
@@ -23,55 +26,63 @@ impl AcpProcess {
         env_vars: &HashMap<String, String>,
         cwd: &Path,
     ) -> anyhow::Result<Self> {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd.exe");
-            c.arg("/C").arg(command).args(args);
-            c
-        } else {
-            let mut c = Command::new(command);
-            c.args(args);
-            c
-        };
-
-        cmd.current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        for (k, v) in env_vars {
-            cmd.env(k, v);
+        // Windows: use our hand-rolled JobObject path. process-wrap's `JobObject`
+        // wrapper associates a completion port with the job; that association
+        // empirically prevents `KILL_ON_JOB_CLOSE` from firing when ccgo dies,
+        // leaving the codex-acp subtree alive. Confirmed via tasklist after
+        // matching reproductions on both paths.
+        #[cfg(windows)]
+        {
+            super::windows_job::spawn(command, args, env_vars, cwd)
         }
 
-        let mut wrap = TokioCommandWrap::from(cmd);
-        #[cfg(windows)]
-        wrap.wrap(JobObject);
-        wrap.wrap(KillOnDrop);
+        #[cfg(not(windows))]
+        {
+            let mut cmd = Command::new(command);
+            cmd.args(args);
+            cmd.current_dir(cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in env_vars {
+                cmd.env(k, v);
+            }
 
-        let mut child = wrap
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn ACP agent '{}': {}", command, e))?;
-        let root_pid = child.id();
+            // ProcessGroup::leader() makes the child the head of a new pgrp so
+            // that `start_kill` (= killpg via process-wrap's ProcessGroupChild)
+            // wipes the whole subtree — agents like codex-acp spawn their own
+            // children, and `KillOnDrop` alone (tokio kill_on_drop = TerminateProcess
+            // on the direct child only) would orphan them on Linux/macOS.
+            let mut wrap = TokioCommandWrap::from(cmd);
+            wrap.wrap(ProcessGroup::leader());
+            wrap.wrap(KillOnDrop);
 
-        let stdin = child
-            .stdin()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("stdin not piped"))?;
-        let stdout = child
-            .stdout()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("stdout not piped"))?;
-        let stderr = child
-            .stderr()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
+            let mut child = wrap
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("Failed to spawn ACP agent '{}': {}", command, e))?;
+            let root_pid = child.id();
 
-        Ok(Self {
-            child,
-            root_pid,
-            stdin,
-            stdout: BufReader::new(stdout),
-            stderr,
-        })
+            let stdin = child
+                .stdin()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("stdin not piped"))?;
+            let stdout = child
+                .stdout()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("stdout not piped"))?;
+            let stderr = child
+                .stderr()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
+
+            Ok(Self {
+                child,
+                root_pid,
+                stdin,
+                stdout: BufReader::new(stdout),
+                stderr,
+            })
+        }
     }
 
     pub async fn kill(&mut self) {

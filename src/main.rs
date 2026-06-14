@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
@@ -116,7 +117,11 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    init_tracing(&cli);
+    // Hold the non-blocking log writer's worker guard alive for the lifetime
+    // of main. Previously we `mem::forget`'d it, which meant the background
+    // writer never flushed on shutdown — shutdown-path tracing was silently
+    // discarded. Dropping the guard here at function return drains the queue.
+    let _tracing_guard = init_tracing(&cli);
 
     let config = Arc::new(build_config(&cli));
 
@@ -135,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing(cli: &Cli) {
+fn init_tracing(cli: &Cli) -> Option<WorkerGuard> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "ccgonext=debug,tower_http=debug".into());
 
@@ -143,7 +148,7 @@ fn init_tracing(cli: &Cli) {
 
     if let Some(log_dir) = &cli.log_dir {
         let file_appender = tracing_appender::rolling::daily(log_dir, "ccgonext.log");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
         let file_layer = fmt::layer()
             .with_target(true)
@@ -156,7 +161,7 @@ fn init_tracing(cli: &Cli) {
             .with(file_layer)
             .init();
 
-        std::mem::forget(_guard);
+        return Some(guard);
     } else if let Some(log_file) = &cli.log_file {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -180,6 +185,7 @@ fn init_tracing(cli: &Cli) {
             .with(stderr_layer)
             .init();
     }
+    None
 }
 
 fn build_config(cli: &Cli) -> Config {
